@@ -25,8 +25,10 @@ CREATE TABLE "meta_info" (
 class DbCon:
 
     con = None
+    db_path = None
 
-    def __init__(self):
+    def __init__(self, db_path="meta.db"):
+        self.db_path = db_path
         self.get_db_con()
 
     def __del__(self):
@@ -52,7 +54,7 @@ class DbCon:
     def get_db_con(self):
         if self.con is not None:
             return self.con
-        self.con = sqlite3.connect("meta.db")
+        self.con = sqlite3.connect(self.db_path)
         cursor = self.con.cursor()
         try:
             cursor.execute("select * from meta_info;")
