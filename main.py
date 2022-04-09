@@ -2,11 +2,12 @@
 
 import logging
 import os
+import re
 import sqlite3
 import uuid
 import datetime
 import sys
-import struct
+import psutil
 
 logging.basicConfig(filename="main.log", level=logging.INFO)
 log = logging.getLogger("main")
@@ -14,6 +15,17 @@ log = logging.getLogger("main")
 table_ddl_meta = """
 CREATE TABLE "meta_info" (
 	"id"	INTEGER NOT NULL UNIQUE COLLATE BINARY,
+	"source_name"	TEXT NOT NULL,
+	"new_name"	TEXT NOT NULL,
+	"size"	INTEGER NOT NULL,
+	"date"	TEXT NOT NULL,
+	PRIMARY KEY("id" AUTOINCREMENT)
+);
+"""
+
+table_ddl_split_file_info = """
+CREATE TABLE "split_file_info" (
+	"id"	INTEGER NOT NULL UNIQUE,
 	"source_name"	TEXT NOT NULL,
 	"new_name"	TEXT NOT NULL,
 	"size"	INTEGER NOT NULL,
@@ -37,6 +49,7 @@ class DbCon:
     def init_meta_db(self):
         cursor = self.con.cursor()
         cursor.execute(table_ddl_meta)
+        cursor.execute(table_ddl_split_file_info)
         cursor.close()
         self.con.commit()
 
@@ -49,6 +62,17 @@ class DbCon:
     def get_meta_by_new_name(self, new_name):
         cursor = self.con.cursor()
         cursor.execute("select * from meta_info where new_name=?", (new_name, ))
+        return cursor.fetchone()
+
+    def insert_split_file_info(self, source_name, new_name, file_size, date):
+        cursor = self.con.cursor()
+        cursor.execute("insert into split_file_info (source_name, new_name, `size`, `date`) values (?, ?, ?, ?)", (source_name, new_name, file_size, date))
+        cursor.close()
+        self.con.commit()
+
+    def get_split_file_info_by_source_name(self, source_name) -> list:
+        cursor = self.con.cursor()
+        cursor.execute("select * from split_file_info where source_name=?", (source_name, ))
         return cursor.fetchone()
 
     def get_db_con(self):
@@ -131,22 +155,158 @@ class MediaEncrypt:
             self.decrypt_file(key, file_path, os.path.join(dest_dir_path, new_filename))
             log.info("file {} decrypted.".format(file))
 
+'''
+文件拆分器，将一个文件拆分成指定大小的每一块。文件名同原文件_index
+'''
+class Spliter:
+
+    db_con: DbCon = None
+    max_size = None
+    source_dir: str = None
+    dest_dir: str = None
+
+    def __init__(self, db_con, source_dir: str,  dest_dir: str, max_size: int):
+        self.db_con = db_con
+        self.max_size = max_size
+        self.dest_dir = dest_dir
+        self.source_dir = source_dir
+
+    def split_file(self, file_name: str):
+        file = self.db_con.get_split_file_info_by_source_name(file_name)
+        if file is not None:
+            log.info("file {} already split.".format(file_name))
+            return
+        origin_file_path = os.path.join(self.source_dir, file_name)
+        if not check_disk_space(dest_dir, os.path.getsize(origin_file_path)):
+            log.info("disk free space is low. stop. current filename {}".format(file_name))
+            exit(1)
+        file_num = (os.path.getsize(origin_file_path) // self.max_size) + 1
+        new_filename_ary = []
+        if file_num <= 1:
+            log.info("file size is {} , lt max_size {}.".format(os.path.getsize(origin_file_path), self.max_size))
+            new_filename_ary.append(file_name)
+        else:
+            log.info("file split to {} .".format(file_num))
+
+            with open(origin_file_path, "rb") as f:
+                origin_filename = file_name
+                #for i in range(1, file_num):
+                mb: bytes = f.read(self.max_size)
+                i = 1
+                while mb:
+                    t_of_a: list = origin_filename.split(".")
+                    t_of_a.insert(len(t_of_a) - 1, str(i))
+                    new_filename: str = ".".join(t_of_a)
+                    log.info("new file is {}. index {} for {}".format(new_filename, i, origin_filename))
+                    new_file_path = os.path.join(self.dest_dir, new_filename)
+                    log.info("new file path in {}".format(new_file_path))
+                    with open(new_file_path, "wb") as nf:
+                        result_w = nf.write(mb)
+                        log.info("write result is {}".format(result_w))
+                    mb = f.read(self.max_size)
+                    i += 1
+                    new_filename_ary.append(new_filename)
+        self.db_con.insert_split_file_info(file_name, "#".join(new_filename_ary),
+                                           os.path.getsize(origin_file_path), datetime.datetime.now())
+
+    def split_dir(self, exclude: list):
+        l_files = os.listdir(self.source_dir)
+        for f_name in l_files:
+            need_continue = False
+            for ec in exclude:
+                re_ec = re.compile(ec)
+                res_s = re_ec.search(f_name)
+                if res_s is not None:
+                    log.info("cause by {}, pass {}".format(ec, f_name))
+                    need_continue = True
+                    break
+            split_file_info = self.db_con.get_split_file_info_by_source_name(f_name)
+            if split_file_info is not None:
+                log.info("file {} already split.".format(f_name))
+                need_continue = True
+            if need_continue:
+                continue
+            self.split_file(f_name)
+
+
+class Combo:
+    db_con: DbCon = None
+    source_dir: str = None
+    dest_dir: str = None
+
+    def __init__(self, db_con, source_dir: str,  dest_dir: str):
+        self.db_con = db_con
+        self.dest_dir = dest_dir
+        self.source_dir = source_dir
+
+    def combo_file(self, file_name: str):
+        source_name = self.__get_source_name_by_new_name(file_name)
+        if os.path.exists(os.path.join(self.dest_dir, source_name)):
+            log.info("source {} already found.".format(source_name))
+            return
+        log.info("parse {} to source_name is {}".format(file_name, source_name))
+        file_info = self.db_con.get_split_file_info_by_source_name(source_name)
+        if file_info is None:
+            log.info("source file info {} not found.".format(source_name))
+            return
+        source_file_path = os.path.join(self.dest_dir, source_name)
+        with open(source_file_path, "wb") as f:
+            new_name: str = file_info[2]
+            new_name_ary = new_name.split("#")
+            for nn in new_name_ary:
+                split_file_path = os.path.join(self.source_dir, nn)
+                if not os.path.exists(split_file_path):
+                    log.info("split file {} not found. exit this process.".format(split_file_path))
+                    return
+                with open(split_file_path, "rb") as sf:
+                    buff_size = 1024 * 1024 * 10
+                    mb = sf.read(buff_size)
+                    while mb:
+                        f.write(mb)
+                        mb = sf.read(buff_size)
+                log.info("split file {} combo done.".format(nn))
+
+    def combo_dir(self):
+        l_files = os.listdir(self.source_dir)
+        for f_name in l_files:
+            self.combo_file(f_name)
+
+    def __get_source_name_by_new_name(self, new_name) -> str:
+        new_name_ary = new_name.split(".")
+        new_name_ary.pop(-2)
+        return ".".join(new_name_ary)
+
+def check_disk_space(path: str, need_size: int):
+    usage = psutil.disk_usage(path.split(os.sep)[0])
+    log.info("path {} disk usage {}".format(path, usage))
+    return usage.free > need_size
+
 
 if __name__ == '__main__':
     key = sys.argv[1]
     source_dir = sys.argv[2]
     dest_dir = sys.argv[3]
-    type = sys.argv[4]  # [E|D] E encrypt D decrypt
+    type = sys.argv[4]  # [E|D|S|C] E encrypt D decrypt S split C combo
     log.info("start date in {} source_dir={}, dest_dir={}".format(datetime.datetime.now(), source_dir, dest_dir))
     dbcon = DbCon()
-    encrypt = MediaEncrypt(dbcon)
     try:
         if type == "E":
+            encrypt = MediaEncrypt(dbcon)
             encrypt.encrypt_files(key, source_dir, dest_dir)
-        else:
+        elif type == "D":
+            encrypt = MediaEncrypt(dbcon)
             encrypt.decrypt_files(key, source_dir, dest_dir)
+        elif type == "S":
+            split = Spliter(dbcon, source_dir, dest_dir, 99 * 1024 * 1024)
+            split.split_dir([r'.*ini'])
+        elif type == "C":
+            combo = Combo(dbcon, source_dir, dest_dir)
+            combo.combo_dir()
+        else:
+            raise NotImplementedError()
     except Exception as e:
         log.info(e)
-        dbcon.con.close()
+        if dbcon is not None:
+            dbcon.con.close()
     log.info("done date in {}".format(datetime.datetime.now()))
 
