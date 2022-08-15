@@ -1,16 +1,32 @@
 #!/usr/bin/python3
-
+import json
 import logging
+import threading
+from concurrent.futures import thread
+from logging.handlers import TimedRotatingFileHandler
 import os
 import re
 import sqlite3
 import uuid
 import datetime
 import sys
-import psutil
 
-logging.basicConfig(filename="main.log", level=logging.INFO)
+import psutil
+from pybaiduphoto import API as YiKeAPI
+import browser_cookie3
+
+# logging.basicConfig(filename="./logs/main.log", level=logging.INFO)
+# log = logging.getLogger("main")
+
+if not os.path.exists("./logs"):
+    os.mkdir("./logs")
+log_handle = TimedRotatingFileHandler("./logs/main.log", when="M")
+console_log_handle = logging.StreamHandler()
+console_log_handle.setLevel(logging.INFO)
 log = logging.getLogger("main")
+log.setLevel(logging.INFO)
+log.addHandler(log_handle)
+log.addHandler(console_log_handle)
 
 table_ddl_meta = """
 CREATE TABLE "meta_info" (
@@ -25,6 +41,28 @@ CREATE TABLE "meta_info" (
 
 table_ddl_split_file_info = """
 CREATE TABLE "split_file_info" (
+	"id"	INTEGER NOT NULL UNIQUE,
+	"source_name"	TEXT NOT NULL,
+	"new_name"	TEXT NOT NULL,
+	"size"	INTEGER NOT NULL,
+	"date"	TEXT NOT NULL,
+	PRIMARY KEY("id" AUTOINCREMENT)
+);
+"""
+
+table_ddl_split_file_info_mpeg = """
+CREATE TABLE "split_file_info_mpeg" (
+	"id"	INTEGER NOT NULL UNIQUE,
+	"source_name"	TEXT NOT NULL,
+	"new_name"	TEXT NOT NULL,
+	"size"	INTEGER NOT NULL,
+	"date"	TEXT NOT NULL,
+	PRIMARY KEY("id" AUTOINCREMENT)
+);
+"""
+
+table_ddl_split_file_info_translate = """
+CREATE TABLE "split_file_info_translate" (
 	"id"	INTEGER NOT NULL UNIQUE,
 	"source_name"	TEXT NOT NULL,
 	"new_name"	TEXT NOT NULL,
@@ -50,6 +88,7 @@ class DbCon:
         cursor = self.con.cursor()
         cursor.execute(table_ddl_meta)
         cursor.execute(table_ddl_split_file_info)
+        cursor.execute(table_ddl_split_file_info_mpeg)
         cursor.close()
         self.con.commit()
 
@@ -64,6 +103,16 @@ class DbCon:
         cursor.execute("select * from meta_info where new_name=?", (new_name, ))
         return cursor.fetchone()
 
+    def list_meta_all(self):
+        cursor = self.con.cursor()
+        cursor.execute("select * from meta_info")
+        return cursor.fetchall()
+
+    def get_last_row_id(self) -> int:
+        cursor = self.con.cursor()
+        cursor.execute("SELECT  MAX(id) FROM meta_info")
+        return cursor.fetchone()[0]
+
     def insert_split_file_info(self, source_name, new_name, file_size, date):
         cursor = self.con.cursor()
         cursor.execute("insert into split_file_info (source_name, new_name, `size`, `date`) values (?, ?, ?, ?)", (source_name, new_name, file_size, date))
@@ -73,6 +122,28 @@ class DbCon:
     def get_split_file_info_by_source_name(self, source_name) -> list:
         cursor = self.con.cursor()
         cursor.execute("select * from split_file_info where source_name=?", (source_name, ))
+        return cursor.fetchone()
+
+    def insert_split_file_info_mpeg(self, source_name, new_name, file_size, date):
+        cursor = self.con.cursor()
+        cursor.execute("insert into split_file_info_mpeg (source_name, new_name, `size`, `date`) values (?, ?, ?, ?)", (source_name, new_name, file_size, date))
+        cursor.close()
+        self.con.commit()
+
+    def get_split_file_info_by_source_name_mpeg(self, source_name) -> list:
+        cursor = self.con.cursor()
+        cursor.execute("select * from split_file_info_mpeg where source_name=?", (source_name,))
+        return cursor.fetchone()
+
+    def insert_split_file_info_translate(self, source_name, new_name, file_size, date):
+        cursor = self.con.cursor()
+        cursor.execute("insert into split_file_info_translate (source_name, new_name, `size`, `date`) values (?, ?, ?, ?)", (source_name, new_name, file_size, date))
+        cursor.close()
+        self.con.commit()
+
+    def get_split_file_info_by_source_name_translate(self, source_name) -> list:
+        cursor = self.con.cursor()
+        cursor.execute("select * from split_file_info_translate where source_name=?", (source_name,))
         return cursor.fetchone()
 
     def get_db_con(self):
@@ -90,10 +161,15 @@ class DbCon:
         else:
             return self.con
 
+    def get_meta_by_new_name_group(self, group_name):
+        cursor = self.con.cursor()
+        cursor.execute("select * from meta_info where new_name like '{}#%'".format(group_name))
+        return cursor.fetchall()
+
 
 class MediaEncrypt:
 
-    con = None
+    con: DbCon = None
 
     def __init__(self, con):
         self.con = con
@@ -120,10 +196,30 @@ class MediaEncrypt:
     def decrypt_file(self, key, file, output_file, chunk_size=1024 * 1024 * 10):
         self.encrypt_file(key, file, output_file, chunk_size)
 
+    # departed
     def anonymous_filename(self, source_name, file_size):
         new_name = str(uuid.uuid1())
         self.con.insert_meta(source_name, new_name, file_size, datetime.datetime.now())
         return new_name
+
+    # departed
+    def anonymous_filename_with_subfix(self, source_name: str, file_size):
+        new_name = ".".join([str(uuid.uuid1()), source_name.split(".")[-1]])
+        self.con.insert_meta(source_name, new_name, file_size, datetime.datetime.now())
+        return new_name
+
+    def anonymous_filename_by_group(self, source_name, file_size, group_name: str):
+        new_name = str(group_name) + "#" + str(uuid.uuid1())
+        self.con.insert_meta(source_name, new_name, file_size, datetime.datetime.now())
+        return new_name
+
+    def anonymous_filename_with_subfix_by_group(self, source_name: str, file_size: int, group_name: str):
+        new_name = str(group_name) + "#" + ".".join([str(uuid.uuid1()), source_name.split(".")[-1]])
+        self.con.insert_meta(source_name, new_name, file_size, datetime.datetime.now())
+        return new_name
+
+    def get_last_row(self) -> int:
+        return self.con.get_last_row_id()
 
     def get_real_filename(self, anonymous_name):
         meta_row = self.con.get_meta_by_new_name(anonymous_name)
@@ -155,6 +251,37 @@ class MediaEncrypt:
             self.decrypt_file(key, file_path, os.path.join(dest_dir_path, new_filename))
             log.info("file {} decrypted.".format(file))
 
+    def encrypt_files_with_subfix(self, key, dir_path, dest_dir_path):
+        if not os.path.exists(dest_dir_path):
+            os.mkdir(dest_dir_path)
+        dir = os.listdir(dir_path)
+        for file in dir:
+            file_path = os.path.join(dir_path, file)
+            if not os.path.isfile(file_path):
+                continue
+            new_filename_with_subfix = self.anonymous_filename_with_subfix(file, os.path.getsize(file_path))
+            log.info("start encrypting file {}".format(file))
+            self.encrypt_file(key, file_path, os.path.join(dest_dir_path, new_filename_with_subfix))
+            log.info("file {} encrypted.".format(file))
+
+    def encrypt_files_with_subfix_by_group(self, key, dir_path, dest_dir_path, group_name: str):
+        if not os.path.exists(dest_dir_path):
+            os.mkdir(dest_dir_path)
+        dir = os.listdir(dir_path)
+        for file in dir:
+            file_path = os.path.join(dir_path, file)
+            if not os.path.isfile(file_path):
+                continue
+            new_filename_with_subfix = self.anonymous_filename_with_subfix_by_group(file, os.path.getsize(file_path),
+                                                                                    group_name)
+            log.info("start encrypting file {}".format(file))
+            self.encrypt_file(key, file_path, os.path.join(dest_dir_path, new_filename_with_subfix))
+            log.info("file {} encrypted.".format(file))
+
+    def get_all_real_filename_by_group(self, group_name):
+        meta_row = self.con.get_meta_by_new_name_group(group_name)
+        return meta_row
+
 '''
 文件拆分器，将一个文件拆分成指定大小的每一块。文件名同原文件_index
 '''
@@ -171,11 +298,11 @@ class Spliter:
         self.dest_dir = dest_dir
         self.source_dir = source_dir
 
-    def split_file(self, file_name: str):
+    def split_file(self, file_name: str) -> list[str]:
         file = self.db_con.get_split_file_info_by_source_name(file_name)
         if file is not None:
             log.info("file {} already split.".format(file_name))
-            return
+            return []
         origin_file_path = os.path.join(self.source_dir, file_name)
         if not check_disk_space(dest_dir, os.path.getsize(origin_file_path)):
             log.info("disk free space is low. stop. current filename {}".format(file_name))
@@ -208,6 +335,7 @@ class Spliter:
                     new_filename_ary.append(new_filename)
         self.db_con.insert_split_file_info(file_name, "#".join(new_filename_ary),
                                            os.path.getsize(origin_file_path), datetime.datetime.now())
+        return new_filename_ary
 
     def split_dir(self, exclude: list):
         l_files = os.listdir(self.source_dir)
@@ -228,6 +356,129 @@ class Spliter:
                 continue
             self.split_file(f_name)
 
+    ###
+    # example param: ffmpeg -ss %d -t %d -accurate_seek -i %s -codec copy -avoid_negative_ts 1 %s
+    ###
+    def split_file_with_ffmpeg(self, file_name: str, duration: int, ffmpeg_param: str):
+        file = self.db_con.get_split_file_info_by_source_name_mpeg(file_name)
+        if file is not None:
+            log.info("file {} already split.".format(file_name))
+            return
+        origin_file_path = os.path.join(self.source_dir, file_name)
+        if not check_disk_space(dest_dir, os.path.getsize(origin_file_path)):
+            log.info("disk free space is low. stop. current filename {}".format(file_name))
+            exit(1)
+        start_time = 0
+        new_filename_ary = []
+        media_duration = self.get_media_duration_time(origin_file_path)
+        file_count_num = int(media_duration // duration) + 1
+        if media_duration <= duration:
+            log.info("media duration is {} , lt {}.".format(media_duration, duration))
+            new_filename_ary.append(file_name)
+        else:
+            log.info("file split to {} .".format(file_count_num))
+        for i in range(0, file_count_num):
+            file_index = i + 1
+            origin_filename = file_name
+            t_of_a: list = origin_filename.split(".")
+            t_of_a.insert(len(t_of_a) - 1, str(file_index))
+            new_filename: str = ".".join(t_of_a)
+            log.info("new file is {}. index {} for {}".format(new_filename, file_index, origin_filename))
+            new_file_path = os.path.join(self.dest_dir, new_filename)
+            log.info("new file path in {}".format(new_file_path))
+            # 众多ffmpeg的库无法实现 -ss参数前置，所以直接使用命令行
+            # +1s 确保不漏掉任何frame
+            ffmpeg_cmd = ffmpeg_param % (start_time, duration + 1, origin_file_path, new_file_path)
+            result = os.popen(ffmpeg_cmd)
+            log.info("file {} split result [{}]".format(file_name, result.readlines()))
+            result.close()
+            start_time += duration
+            new_filename_ary.append(new_filename)
+        self.db_con.insert_split_file_info_mpeg(file_name, "#".join(new_filename_ary),
+                                           os.path.getsize(origin_file_path), datetime.datetime.now())
+
+    def split_dir_with_ffmpeg(self, exclude: list, duration: int, ffmpeg_param: str):
+        l_files = os.listdir(self.source_dir)
+        for f_name in l_files:
+            need_continue = False
+            for ec in exclude:
+                re_ec = re.compile(ec)
+                res_s = re_ec.search(f_name)
+                if res_s is not None:
+                    log.info("cause by {}, pass {}".format(ec, f_name))
+                    need_continue = True
+                    break
+            split_file_info = self.db_con.get_split_file_info_by_source_name_mpeg(f_name)
+            if split_file_info is not None:
+                log.info("file {} already split.".format(f_name))
+                need_continue = True
+            if need_continue:
+                continue
+            self.split_file_with_ffmpeg(f_name, duration, ffmpeg_param)
+
+    def get_media_duration_time(self, file_path: str):
+        result = os.popen("ffprobe -i \"%s\" -show_entries format=duration -v quiet -of csv=\"p=0\"" % file_path)
+        result_plant = result.readlines().pop(0)
+        result.close()
+        return float(result_plant.strip())
+
+    def split_dir_with_translate(self, exclude: list, duration: int, ffmpeg_param: str):
+        l_files = os.listdir(self.source_dir)
+        for f_name in l_files:
+            need_continue = False
+            for ec in exclude:
+                re_ec = re.compile(ec)
+                res_s = re_ec.search(f_name)
+                if res_s is not None:
+                    log.info("cause by {}, pass {}".format(ec, f_name))
+                    need_continue = True
+                    break
+            split_file_info = self.db_con.get_split_file_info_by_source_name_translate(f_name)
+            if split_file_info is not None:
+                log.info("file {} already split.".format(f_name))
+                need_continue = True
+            if need_continue:
+                continue
+            self.split_file_with_translate(f_name, duration, ffmpeg_param)
+
+    # return split file name list
+    def split_file_with_translate(self, file_name: str, duration: int, ffmpeg_param: str) -> list[str]:
+        file = self.db_con.get_split_file_info_by_source_name_translate(file_name)
+        if file is not None:
+            log.info("file {} already split.".format(file_name))
+            return []
+        origin_file_path = os.path.join(self.source_dir, file_name)
+        if not check_disk_space(dest_dir, os.path.getsize(origin_file_path)):
+            log.info("disk free space is low. stop. current filename {}".format(file_name))
+            exit(1)
+        start_time = 0
+        new_filename_ary = []
+        media_duration = self.get_media_duration_time(origin_file_path)
+        file_count_num = int(media_duration // duration) + 1
+        if media_duration <= duration:
+            log.info("media duration is {} , lt {}.".format(media_duration, duration))
+            new_filename_ary.append(file_name)
+        else:
+            log.info("file split to {} .".format(file_count_num))
+        for i in range(0, file_count_num):
+            file_index = i + 1
+            origin_filename = file_name
+            t_of_a: list = origin_filename.split(".")
+            t_of_a.insert(len(t_of_a) - 1, str(file_index))
+            new_filename: str = ".".join(t_of_a)
+            log.info("new file is {}. index {} for {}".format(new_filename, file_index, origin_filename))
+            new_file_path = os.path.join(self.dest_dir, new_filename)
+            log.info("new file path in {}".format(new_file_path))
+            # 众多ffmpeg的库无法实现 -ss参数前置，所以直接使用命令行
+            ffmpeg_cmd = ffmpeg_param % (start_time, duration, origin_file_path, new_file_path)
+            result = os.popen(ffmpeg_cmd)
+            log.info("file {} split result  {}".format(file_name, result.readlines()))
+            result.close()
+            start_time += duration
+            new_filename_ary.append(new_filename)
+        self.db_con.insert_split_file_info_translate(file_name, "#".join(new_filename_ary),
+                                                os.path.getsize(origin_file_path), datetime.datetime.now())
+        return new_filename_ary
 
 class Combo:
     db_con: DbCon = None
@@ -276,17 +527,276 @@ class Combo:
         new_name_ary.pop(-2)
         return ".".join(new_name_ary)
 
+    # ffmpeg -f concat -safe 0 -i f.txt -c copy -strict -2 concated.mp4
+    # 由于直接copy流，ffmpeg在前面拆分视频时，会在关键帧的位置重复。所以这里合并视频的时候，会在片头片尾重复一小段视频
+    def combo_file_with_ffmpeg(self, file_name: str, ffmpeg_param: str):
+        source_name = self.__get_source_name_by_new_name(file_name)
+        if os.path.exists(os.path.join(self.dest_dir, source_name)):
+            log.info("source {} already found.".format(source_name))
+            return
+        log.info("parse {} to source_name is {}".format(file_name, source_name))
+        file_info = self.db_con.get_split_file_info_by_source_name_mpeg(source_name)
+        if file_info is None:
+            log.info("source file info {} not found.".format(source_name))
+            return
+        source_file_path = os.path.join(self.dest_dir, source_name)
+        new_name: str = file_info[2]
+        new_name_ary = new_name.split("#")
+        new_name_path_ary: list = []
+        for nn in new_name_ary:
+            split_file_path = os.path.join(self.source_dir, nn)
+            if not os.path.exists(split_file_path):
+                log.info("split file {} not found. exit this process.".format(split_file_path))
+                return
+            new_name_path_ary.append("file '" + split_file_path.replace("\\", "/") + "'")
+        concat_file_path = os.path.join(self.dest_dir, "concat.txt")
+        with open(concat_file_path, "w", encoding="u8") as cf:
+            cf.write('\n'.join(new_name_path_ary))
+        cmd = ffmpeg_param % (concat_file_path, "\"" + source_file_path + "\"")
+        result = os.popen(cmd)
+        log.info("split file {} reuslut is {} combo done.".format(source_name, result.readlines()))
+        result.close()
+
+    def combo_dir_with_ffmpeg(self, ffmpeg_param: str):
+        l_files = os.listdir(self.source_dir)
+        for f_name in l_files:
+            self.combo_file_with_ffmpeg(f_name, ffmpeg_param)
+
+
+class SplitAndEncrypt:
+    combo: Combo
+    split: Spliter
+    encrypt: MediaEncrypt
+    dbcon: DbCon
+    encrypt_key: str
+    source_dir: str
+    dest_dir: str
+    max_size: int
+
+    def __init__(self, db_con: DbCon, source_dir: str,  dest_dir: str, key: str, max_size: int = 99 * 1024 * 1024):
+        self.db_con = db_con
+        self.combo = Combo(db_con, source_dir, dest_dir)
+        self.split = Spliter(db_con, source_dir, dest_dir, max_size)
+        self.encrypt = MediaEncrypt(dbcon)
+        self.encrypt_key = key
+        self.source_dir = source_dir
+        self.dest_dir = dest_dir
+        self.max_size = max_size
+
+    def split_and_encrypt_file(self, file_name: str) -> str:
+        tmp_dir: str = os.path.join(self.source_dir, "tmp")
+        if not os.path.exists(tmp_dir):
+            os.mkdir(tmp_dir)
+        s: Spliter = Spliter(self.db_con, self.source_dir, tmp_dir, self.max_size)
+        split_file_name_list: list[str] = s.split_file(file_name)
+        group_name: str = self.db_con.get_split_file_info_by_source_name(file_name)[0]
+        log.info("split file list is {} group name is {}".format(split_file_name_list, group_name))
+        self.encrypt.encrypt_files_with_subfix_by_group(self.encrypt_key, tmp_dir, self.dest_dir, group_name)
+        log.info("encrypt {} done, delete source files".format(split_file_name_list))
+        self.delete_files(tmp_dir, split_file_name_list)
+        return tmp_dir
+
+    def split_and_encrypt_dir(self, exclude: list):
+        l_files = os.listdir(self.source_dir)
+        for f_name in l_files:
+            need_continue = False
+            for ec in exclude:
+                re_ec = re.compile(ec)
+                res_s = re_ec.search(f_name)
+                if res_s is not None:
+                    log.info("cause by {}, pass {}".format(ec, f_name))
+                    need_continue = True
+                    break
+            split_file_info = self.db_con.get_split_file_info_by_source_name(f_name)
+            if split_file_info is not None:
+                log.info("file {} already split.".format(f_name))
+                need_continue = True
+            if need_continue:
+                continue
+            if not os.path.isfile(os.path.join(self.source_dir, f_name)):
+                log.info("file {} not file.".format(f_name))
+                continue
+            self.split_and_encrypt_file(f_name)
+
+    def decrypt_and_combo_file(self, file_name_array: list):
+        tmp_dir: str = os.path.join(self.source_dir, "tmp")
+        delete_file_name_array: list = []
+        if not os.path.exists(tmp_dir):
+            os.mkdir(tmp_dir)
+        for fn in file_name_array:
+            fn_path: str = os.path.join(self.source_dir, fn[2])
+            dest_path = os.path.join(tmp_dir, fn[1])
+            self.encrypt.decrypt_file(self.encrypt_key, fn_path, dest_path)
+            delete_file_name_array.append(fn[1])
+        log.info("decrypt {} done".format(file_name_array))
+        cb: Combo = Combo(self.db_con, tmp_dir, self.dest_dir)
+        cb.combo_dir()
+        log.info("combo {} done".format(file_name_array))
+        self.delete_files(tmp_dir, delete_file_name_array)
+
+    def decrypt_and_combo_dir(self, exclude: list):
+        l_files: list[str] = os.listdir(self.source_dir)
+        already_process_file_arr: list[str] = []
+        for f_name in l_files:
+            need_continue = False
+            for ec in exclude:
+                re_ec = re.compile(ec)
+                res_s = re_ec.search(f_name)
+                if res_s is not None:
+                    log.info("cause by {}, pass {}".format(ec, f_name))
+                    need_continue = True
+                    break
+            if need_continue:
+                continue
+            if not os.path.isfile(os.path.join(self.source_dir, f_name)):
+                log.info("file {} not file.".format(f_name))
+                continue
+            # 判读是否为group文件
+            if f_name.find("#") == -1:
+                log.warning("file {} not a group encrypt file.".format(f_name))
+                continue
+            else:
+                # 是否是已处理过的组文件
+                if f_name in already_process_file_arr:
+                    log.warning("file {} already handled".format(f_name))
+                    continue
+                # 匹配本地文件和数据库记录
+                f_group_name: str = f_name.split("#")[0]
+                file_group_array: list[str] = []
+                for f in l_files:
+                    if f.find(f_group_name + "#") != -1:
+                        file_group_array.append(f)
+                new_filename_array = self.encrypt.get_all_real_filename_by_group(f_group_name)
+                if len(new_filename_array) != len(file_group_array):
+                    log.warning("local file not match db record. local files {}, db records {}"
+                                .format(file_group_array, new_filename_array))
+                log.info("start decrypting and combo file {}".format(new_filename_array))
+                self.decrypt_and_combo_file(new_filename_array)
+                for nf in new_filename_array:
+                    already_process_file_arr.append(nf[2])
+                log.info("file {}  decrypted and combed".format(new_filename_array))
+
+    # return translate files dir
+    def split_translate_and_encrypt_file(self, file_name: str, duration: int, ffmpeg_param: str) -> str:
+        tmp_dir: str = os.path.join(self.source_dir, "tmp")
+        if not os.path.exists(tmp_dir):
+            os.mkdir(tmp_dir)
+        s: Spliter = Spliter(self.db_con, self.source_dir, tmp_dir, 0)
+        split_file_name_list: list[str] = s.split_file_with_translate(file_name, duration, ffmpeg_param)
+        log.info("split file list is {}".format(split_file_name_list))
+        self.encrypt.encrypt_files_with_subfix(self.encrypt_key, tmp_dir, self.dest_dir)
+        log.info("encrypt {} done, delete source files".format(split_file_name_list))
+        self.delete_files(tmp_dir, split_file_name_list)
+        return tmp_dir
+
+    def delete_files(self, dir_path: str, file_name_list: list[str]):
+        for fn in file_name_list:
+            fn_path: str = os.path.join(dir_path, fn)
+            if os.path.exists(fn_path):
+                os.remove(fn_path)
+                log.info("file {} deleted".format(fn_path))
+            else:
+                log.warning("file {} not found.".format(fn_path))
+
+    def split_translate_and_encrypt_dir(self, exclude: list, duration: int, ffmpeg_param: str):
+        l_files = os.listdir(self.source_dir)
+        for f_name in l_files:
+            need_continue = False
+            for ec in exclude:
+                re_ec = re.compile(ec)
+                res_s = re_ec.search(f_name)
+                if res_s is not None:
+                    log.info("cause by {}, pass {}".format(ec, f_name))
+                    need_continue = True
+                    break
+            split_file_info = self.db_con.get_split_file_info_by_source_name_translate(f_name)
+            if split_file_info is not None:
+                log.info("file {} already split.".format(f_name))
+                need_continue = True
+            if need_continue:
+                continue
+            if not os.path.isfile(os.path.join(self.source_dir, f_name)):
+                log.info("file {} not file.".format(f_name))
+                continue
+            self.split_translate_and_encrypt_file(f_name, duration, ffmpeg_param)
+
+
+class YiKeClient:
+    client: YiKeAPI
+
+    def __init__(self, cookies: str = None):
+        if cookies is not None:
+            self.client = YiKeAPI(YiKeClient.__cookie_to_dic__(self, cookies))
+        else:
+            self.client = YiKeAPI(browser_cookie3.firefox())
+
+    def upload_file(self, file_path: str, album_name=None):
+        item_info = self.client.upload_1file(file_path)
+        if album_name is not None:
+            all_albums = self.client.getAlbumList_All("Album")
+            al_info = None
+            for al in all_albums:
+                if al.info['title'] == album_name:
+                    al_info = al
+                    break
+            al_info.append(item_info)
+        log.info("file {} upload done".format(file_path))
+
+    def list_page(self, type_name: str = "Item", cursor=None):
+        return self.client.get_self_1page(type_name, cursor)
+
+    def upload_dirs(self, dir: str, exclude: list = None, album_name=None, qt_progress_signal=None):
+        l_files: list[str] = os.listdir(dir)
+        for f_name in l_files:
+            need_continue = False
+            for ec in exclude:
+                re_ec = re.compile(ec)
+                res_s = re_ec.search(f_name)
+                if res_s is not None:
+                    log.info("cause by {}, pass {}".format(ec, f_name))
+                    need_continue = True
+                    break
+            if need_continue:
+                continue
+        log.info("start upload dir {} to yiKeAlbum".format(dir))
+        for fn in l_files:
+            self.upload_file(os.path.join(dir, fn), album_name)
+            if qt_progress_signal is not None:
+                qt_progress_signal.emit(int(1 / len(l_files) * 100))
+
+    def upload_dirs_qt(self, dir: str, exclude: list = None, album_name=None, qt_progress_signal=None):
+        self.upload_dirs(dir, exclude, album_name, qt_progress_signal)
+
+    def download(self, item, dest_dir: str):
+        item.download(dest_dir)
+
+    def __cookie_to_dic__(self, cookie) -> dict:
+        cookie_dic = {}
+        for i in cookie.split('; '):
+            cookie_dic[i.split('=')[0]] = "=".join(i.split('=')[1:])
+        return cookie_dic
+
+    def play(self, file_path: str):
+        os.popen("ffplay {}".format(file_path))
+
 def check_disk_space(path: str, need_size: int):
     usage = psutil.disk_usage(path.split(os.sep)[0])
     log.info("path {} disk usage {}".format(path, usage))
     return usage.free > need_size
 
 
+# storage use SF or ST (codec and no repeat frame), r18 use STAE
 if __name__ == '__main__':
     key = sys.argv[1]
     source_dir = sys.argv[2]
     dest_dir = sys.argv[3]
-    type = sys.argv[4]  # [E|D|S|C] E encrypt D decrypt S split C combo
+    type = sys.argv[4]  # [E|D|S|C] E encrypt D decrypt S split(can't preview) C combo SF (split with ffmpeg)
+    # CF (combo with ffmpeg) ST (translate codec with ffmpeg) CT (combo with ffmpeg equals CF)
+    # SAE(split and encrypt) SAE(decrypt and combo)
+    # SFAE (split with ffmpeg and encrypt) STAE (split translate with ffmpeg and encrypt)
+    # CTAE (decrypt and combo translate files with ffmpeg)
+    # !!! CF and SF timeline is not accurate
+    # YKU (upload to yiKeAlbum)
     log.info("start date in {} source_dir={}, dest_dir={}".format(datetime.datetime.now(), source_dir, dest_dir))
     dbcon = DbCon()
     try:
@@ -298,14 +808,47 @@ if __name__ == '__main__':
             encrypt.decrypt_files(key, source_dir, dest_dir)
         elif type == "S":
             split = Spliter(dbcon, source_dir, dest_dir, 99 * 1024 * 1024)
-            split.split_dir([r'.*ini'])
+            split.split_dir([r'*.ini'])
         elif type == "C":
             combo = Combo(dbcon, source_dir, dest_dir)
             combo.combo_dir()
+        elif type == "SF":
+            sf = Spliter(dbcon, source_dir, dest_dir, 0)
+            ffmpeg_param = "ffmpeg -ss %d -t %d -accurate_seek -i \"%s\" -codec copy -avoid_negative_ts 1 \"%s\" -loglevel warning"
+            sf.split_dir_with_ffmpeg([r'*.ini'], int(60 * 1.1), ffmpeg_param)
+        elif type == "CF" or type == "CT":
+            combo = Combo(dbcon, source_dir, dest_dir)
+            ffmpeg_param = "ffmpeg -f concat -safe 0 -i %s -c copy -strict -2 %s -loglevel warning"
+            combo.combo_dir_with_ffmpeg(ffmpeg_param)
+        elif type == "ST":
+            st = Spliter(dbcon, source_dir, dest_dir, 0)
+            ffmpeg_param = "ffmpeg -ss %d -t %d -i \"%s\" -c:v h264_qsv -global_quality 10 -c:a aac -strict experimental \"%s\" -loglevel warning"
+            st.split_dir_with_translate([r'*.ini'], int(60 * 1.0), ffmpeg_param)
+        elif type == "SAE":
+            se = SplitAndEncrypt(dbcon, source_dir, dest_dir, key, 99 * 1024 * 1024)
+            se.split_and_encrypt_dir([r'*.ini'])
+        elif type == "CAE":
+            se = SplitAndEncrypt(dbcon, source_dir, dest_dir, key, 99 * 1024 * 1024)
+            se.decrypt_and_combo_dir([r'*.ini'])
+        elif type == "SFAE":
+            raise NotImplementedError()
+        elif type == "STAE":
+            stae = SplitAndEncrypt(dbcon, source_dir, dest_dir, key)
+            ffmpeg_param = "ffmpeg -ss %d -t %d -i \"%s\" -c:v h264_qsv -global_quality 15 -c:a aac -strict experimental \"%s\" -loglevel warning"
+            stae.split_translate_and_encrypt_dir([r'*.ini'], int(60 * 1.0), ffmpeg_param)
+        elif type == "CTAE":
+            raise NotImplementedError()
+        elif type == "YKU": #TODO test
+            album_name = sys.argv[5]
+            cookies = sys.argv[6]
+            ykClient = YiKeClient(cookies)
+            if album_name == "x":
+                album_name = None
+            ykClient.upload_dirs(source_dir, [r'*.ini'], album_name)
         else:
             raise NotImplementedError()
     except Exception as e:
-        log.info(e)
+        log.info(e.with_traceback())
         if dbcon is not None:
             dbcon.con.close()
     log.info("done date in {}".format(datetime.datetime.now()))

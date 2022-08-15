@@ -1,3 +1,10 @@
 .idea/
 *.log
 *.db
+config.ini
+logs/
+dist/
+build/
+.run/
+*.spec
+venv/

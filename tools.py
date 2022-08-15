@@ -18,6 +18,7 @@ class FileTools:
     def __init__(self, output_dir):
         self.output_dir = output_dir
 
+    # 移动目录树下面的文件到单层目录，带原来的文件夹名称
     def move_subdir_file(self, dest_dir, prefix_name):
         files = os.listdir(dest_dir)
         for file in files:
