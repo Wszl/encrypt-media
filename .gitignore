@@ -8,3 +8,6 @@ build/
 .run/
 *.spec
 venv/
+cache/
+preview/
+thumb/

@@ -1,19 +1,17 @@
 #!/usr/bin/python3
-import json
+import datetime
 import logging
-import threading
-from concurrent.futures import thread
-from logging.handlers import TimedRotatingFileHandler
 import os
 import re
 import sqlite3
-import uuid
-import datetime
 import sys
+import uuid
+from logging.handlers import TimedRotatingFileHandler
 
+import browser_cookie3
+import ffmpeg
 import psutil
 from pybaiduphoto import API as YiKeAPI
-import browser_cookie3
 
 # logging.basicConfig(filename="./logs/main.log", level=logging.INFO)
 # log = logging.getLogger("main")
@@ -113,6 +111,21 @@ class DbCon:
         cursor.execute("SELECT  MAX(id) FROM meta_info")
         return cursor.fetchone()[0]
 
+    def list_meta_by_source_name_index_for_one_video(self, source_name: str):
+        query_name = re.sub(r"(?<=\.).(?=\.)", "%", source_name)
+        cursor = self.con.cursor()
+        cursor.execute("select * from meta_info mi where source_name like ?", (query_name, ))
+        return cursor.fetchall()
+
+    def list_meta_by_source_name_prefix_for_one_video(self, source_name: str):
+        cursor = self.con.cursor()
+        cursor.execute("select * from meta_info mi where source_name like ?", (source_name + "%", ))
+        return cursor.fetchall()
+
+    #
+    #        split_file_info
+    #
+
     def insert_split_file_info(self, source_name, new_name, file_size, date):
         cursor = self.con.cursor()
         cursor.execute("insert into split_file_info (source_name, new_name, `size`, `date`) values (?, ?, ?, ?)", (source_name, new_name, file_size, date))
@@ -185,7 +198,7 @@ class MediaEncrypt:
     def decrypt_xor(self, bytes, key_bytes):
         return self.encrypt_xor(bytes, key_bytes)
 
-    def encrypt_file(self, key, file, output_file, chunk_size=1024 * 1024 * 10):
+    def encrypt_file(self, key, file, output_file, chunk_size=1024 * 1024 * 100):
         with open(file, "rb") as f, open(output_file, "wb") as of:
             chuck_block = f.read(chunk_size)
             while chuck_block:
@@ -193,7 +206,10 @@ class MediaEncrypt:
                 of.write(out_chuck)
                 chuck_block = f.read(chunk_size)
 
-    def decrypt_file(self, key, file, output_file, chunk_size=1024 * 1024 * 10):
+    def decrypt_file(self, key, file, output_file, chunk_size=1024 * 1024 * 100):
+        if os.path.exists(output_file):
+            log.info("file {} already exitst.".format(output_file))
+            return
         self.encrypt_file(key, file, output_file, chunk_size)
 
     # departed
@@ -223,6 +239,8 @@ class MediaEncrypt:
 
     def get_real_filename(self, anonymous_name):
         meta_row = self.con.get_meta_by_new_name(anonymous_name)
+        if meta_row is None:
+            return None
         return meta_row[1]
 
     def encrypt_files(self, key, dir_path, dest_dir_path):
@@ -247,6 +265,9 @@ class MediaEncrypt:
             if not os.path.isfile(file_path):
                 continue
             new_filename = self.get_real_filename(file)
+            if new_filename is None:
+                log.info("file name {} not found in meta_table")
+                continue
             log.info("start decrypting file {}".format(file))
             self.decrypt_file(key, file_path, os.path.join(dest_dir_path, new_filename))
             log.info("file {} decrypted.".format(file))
@@ -365,7 +386,7 @@ class Spliter:
             log.info("file {} already split.".format(file_name))
             return
         origin_file_path = os.path.join(self.source_dir, file_name)
-        if not check_disk_space(dest_dir, os.path.getsize(origin_file_path)):
+        if not check_disk_space(self.dest_dir, os.path.getsize(origin_file_path)):
             log.info("disk free space is low. stop. current filename {}".format(file_name))
             exit(1)
         start_time = 0
@@ -390,12 +411,72 @@ class Spliter:
             # +1s 确保不漏掉任何frame
             ffmpeg_cmd = ffmpeg_param % (start_time, duration + 1, origin_file_path, new_file_path)
             result = os.popen(ffmpeg_cmd)
-            log.info("file {} split result [{}]".format(file_name, result.readlines()))
-            result.close()
+            ret_msg = result.read()
+            ret_suc = result.close()
+            if ret_suc is not None:
+                raise Exception(str(ret_suc) + ret_msg)
+            log.info("file {} split result  {}".format(file_name, ret_msg))
             start_time += duration
             new_filename_ary.append(new_filename)
         self.db_con.insert_split_file_info_mpeg(file_name, "#".join(new_filename_ary),
                                            os.path.getsize(origin_file_path), datetime.datetime.now())
+        return new_filename_ary
+
+    def split_file_with_ffmpeg_fixed_size(self, file_name: str, max_size: int, duration: int, ffmpeg_param: str):
+        file = self.db_con.get_split_file_info_by_source_name_mpeg(file_name)
+        if file is not None:
+            log.info("file {} already split.".format(file_name))
+            return
+        origin_file_path = os.path.join(self.source_dir, file_name)
+        if not check_disk_space(self.dest_dir, os.path.getsize(origin_file_path)):
+            log.info("disk free space is low. stop. current filename {}".format(file_name))
+            exit(1)
+        start_time = 0
+        new_filename_ary = []
+        media_duration = self.get_media_duration_time(origin_file_path)
+        file_count_num = int(media_duration // duration) + 1
+        if media_duration <= duration:
+            log.info("media duration is {} , lt {}.".format(media_duration, duration))
+            new_filename_ary.append(file_name)
+        else:
+            log.info("file split to {} .".format(file_count_num))
+        for i in range(0, file_count_num):
+            file_index = i + 1
+            origin_filename = file_name
+            t_of_a: list = origin_filename.split(".")
+            t_of_a.insert(len(t_of_a) - 1, str(file_index))
+            new_filename: str = ".".join(t_of_a)
+            log.info("new file is {}. index {} for {}".format(new_filename, file_index, origin_filename))
+            new_file_path = os.path.join(self.dest_dir, new_filename)
+            log.info("new file path in {}".format(new_file_path))
+            is_file_size_ok = True
+            exec_time = 0
+            real_duration = duration
+            while is_file_size_ok:
+                # 众多ffmpeg的库无法实现 -ss参数前置，所以直接使用命令行
+                # +1s 确保不漏掉任何frame
+                if exec_time > 0:
+                    log.info("reduce duration for file {} time {}".format(new_filename, exec_time))
+                real_duration = duration - (exec_time * 10)
+                if real_duration <= 0:
+                    log.warning("file {} real_duration is {} exception.".format(new_filename, real_duration))
+                    raise Exception("file {} real_duration is {} exception.".format(new_filename, real_duration))
+                ffmpeg_cmd = ffmpeg_param % (start_time, real_duration + 1, origin_file_path, new_file_path)
+                result = os.popen(ffmpeg_cmd)
+                ret_msg = result.read()
+                ret_suc = result.close()
+                if ret_suc is not None:
+                    raise Exception(str(ret_suc) + ret_msg)
+                is_file_size_ok = os.path.getsize(new_file_path) >= max_size
+                exec_time += 1
+            log.info("file {} split result  {}".format(file_name, ret_msg))
+            start_time += real_duration
+            new_filename_ary.append(new_filename)
+        self.db_con.insert_split_file_info_mpeg(file_name, "#".join(new_filename_ary),
+                                           os.path.getsize(origin_file_path), datetime.datetime.now())
+        return new_filename_ary
+
+
 
     def split_dir_with_ffmpeg(self, exclude: list, duration: int, ffmpeg_param: str):
         l_files = os.listdir(self.source_dir)
@@ -415,6 +496,43 @@ class Spliter:
             if need_continue:
                 continue
             self.split_file_with_ffmpeg(f_name, duration, ffmpeg_param)
+
+    def split_dir_with_ffmpeg_fixed_size(self, exclude: list, max_size: int, ffmpeg_param: str):
+        l_files = os.listdir(self.source_dir)
+        for f_name in l_files:
+            need_continue = False
+            for ec in exclude:
+                re_ec = re.compile(ec)
+                res_s = re_ec.search(f_name)
+                if res_s is not None:
+                    log.info("cause by {}, pass {}".format(ec, f_name))
+                    need_continue = True
+                    break
+            split_file_info = self.db_con.get_split_file_info_by_source_name_mpeg(f_name)
+            if split_file_info is not None:
+                log.info("file {} already split.".format(f_name))
+                need_continue = True
+            if need_continue:
+                continue
+            # 由于不同码率下同一时间长度产生的文件大小不一致，而要控制文件大小，则要控制时间，所以每个片段的时长要计算，而不能取固定值
+            duration = self.cacl_media_duration_by_fixed_size(max_size, f_name)
+            if duration is None or duration < 0:
+                raise Exception("duration {} is wrong for file {}".format(duration, f_name))
+            self.split_file_with_ffmpeg_fixed_size(f_name, max_size, duration, ffmpeg_param)
+
+    def cacl_media_duration_by_fixed_size(self, max_size: int, file_name: str):
+        probe: dict = ffmpeg.probe(os.path.join(self.source_dir, file_name))
+        rate = 0
+        for stream in probe.get("streams"):
+            bit_rate_val = stream.get("bit_rate")
+            if bit_rate_val is None:
+                bit_rate_val = 64 * 1000
+            bit_rate = int(bit_rate_val)
+            if bit_rate is None:
+                raise Exception("file {} stream {} bit_rate is None. probe is {}".format(file_name, stream.get("index"), probe))
+            rate += bit_rate
+        duration = 8 * (max_size - 10 * 1024 * 1024) // rate
+        return duration
 
     def get_media_duration_time(self, file_path: str):
         result = os.popen("ffprobe -i \"%s\" -show_entries format=duration -v quiet -of csv=\"p=0\"" % file_path)
@@ -448,7 +566,7 @@ class Spliter:
             log.info("file {} already split.".format(file_name))
             return []
         origin_file_path = os.path.join(self.source_dir, file_name)
-        if not check_disk_space(dest_dir, os.path.getsize(origin_file_path)):
+        if not check_disk_space(self.dest_dir, os.path.getsize(origin_file_path)):
             log.info("disk free space is low. stop. current filename {}".format(file_name))
             exit(1)
         start_time = 0
@@ -470,15 +588,33 @@ class Spliter:
             new_file_path = os.path.join(self.dest_dir, new_filename)
             log.info("new file path in {}".format(new_file_path))
             # 众多ffmpeg的库无法实现 -ss参数前置，所以直接使用命令行
-            ffmpeg_cmd = ffmpeg_param % (start_time, duration, origin_file_path, new_file_path)
-            result = os.popen(ffmpeg_cmd)
-            log.info("file {} split result  {}".format(file_name, result.readlines()))
-            result.close()
+            self.__ffmpeg_cmd__(ffmpeg_param, start_time, duration, origin_file_path, new_file_path)
+            # ffmpeg_cmd = ffmpeg_param % (start_time, duration, "\"" + origin_file_path + "\"", "\"" + new_file_path + "\"")
+            # log.info("cmd: {}".format(ffmpeg_cmd))
+            # result = os.popen(ffmpeg_cmd)
+            # ret_msg = result.read()
+            # ret_suc = result.close()
+            # if ret_suc is not None:
+            #     raise Exception(ret_suc + ret_msg)
+            # log.info("file {} split result  {}".format(file_name, ret_msg))
+            # result.close()
             start_time += duration
             new_filename_ary.append(new_filename)
         self.db_con.insert_split_file_info_translate(file_name, "#".join(new_filename_ary),
                                                 os.path.getsize(origin_file_path), datetime.datetime.now())
         return new_filename_ary
+
+    def __ffmpeg_cmd__(self, ffmpeg_param: str, start_time: int, duration: int, origin_file_path: str, new_file_path: str):
+        ffmpeg_cmd = ffmpeg_param % (start_time, duration, "\"" + origin_file_path + "\"", "\"" + new_file_path + "\"")
+        log.info("cmd: {}".format(ffmpeg_cmd))
+        result = os.popen(ffmpeg_cmd)
+        ret_msg = result.read()
+        ret_suc = result.close()
+        if ret_suc is not None:
+            log.error("ffmpeg_cmd: {}".format(ffmpeg_cmd))
+            raise Exception(str(ret_suc) + ret_msg)
+        log.info("file {} split result  {}".format(origin_file_path, ret_msg))
+        result.close()
 
 class Combo:
     db_con: DbCon = None
@@ -577,7 +713,7 @@ class SplitAndEncrypt:
         self.db_con = db_con
         self.combo = Combo(db_con, source_dir, dest_dir)
         self.split = Spliter(db_con, source_dir, dest_dir, max_size)
-        self.encrypt = MediaEncrypt(dbcon)
+        self.encrypt = MediaEncrypt(db_con)
         self.encrypt_key = key
         self.source_dir = source_dir
         self.dest_dir = dest_dir
@@ -689,6 +825,31 @@ class SplitAndEncrypt:
         self.delete_files(tmp_dir, split_file_name_list)
         return tmp_dir
 
+    # return ffmpeg files dir
+    def split_ffmpeg_and_encrypt_file(self, file_name: str, duration: int, ffmpeg_param: str) -> str:
+        tmp_dir: str = os.path.join(self.source_dir, "tmp")
+        if not os.path.exists(tmp_dir):
+            os.mkdir(tmp_dir)
+        s: Spliter = Spliter(self.db_con, self.source_dir, tmp_dir, 0)
+        split_file_name_list: list[str] = s.split_file_with_ffmpeg(file_name, duration, ffmpeg_param)
+        log.info("split file list is {}".format(split_file_name_list))
+        self.encrypt.encrypt_files_with_subfix(self.encrypt_key, tmp_dir, self.dest_dir)
+        log.info("encrypt {} done, delete source files".format(split_file_name_list))
+        self.delete_files(tmp_dir, split_file_name_list)
+        return tmp_dir
+
+    def split_ffmpeg_and_encrypt_file_fixed_size(self, file_name: str, duration: int, max_size: int, ffmpeg_param: str) -> str:
+        tmp_dir: str = os.path.join(self.source_dir, "tmp")
+        if not os.path.exists(tmp_dir):
+            os.mkdir(tmp_dir)
+        s: Spliter = Spliter(self.db_con, self.source_dir, tmp_dir, 0)
+        split_file_name_list: list[str] = s.split_file_with_ffmpeg_fixed_size(file_name, duration, max_size, ffmpeg_param)
+        log.info("split file list is {}".format(split_file_name_list))
+        self.encrypt.encrypt_files_with_subfix(self.encrypt_key, tmp_dir, self.dest_dir)
+        log.info("encrypt {} done, delete source files".format(split_file_name_list))
+        self.delete_files(tmp_dir, split_file_name_list)
+        return tmp_dir
+
     def delete_files(self, dir_path: str, file_name_list: list[str]):
         for fn in file_name_list:
             fn_path: str = os.path.join(dir_path, fn)
@@ -720,11 +881,83 @@ class SplitAndEncrypt:
                 continue
             self.split_translate_and_encrypt_file(f_name, duration, ffmpeg_param)
 
+    # 不保证最终文件大小
+    def split_ffmpeg_and_encrypt_dir(self, exclude: list, max_size: int, ffmpeg_param: str):
+        l_files = os.listdir(self.source_dir)
+        for f_name in l_files:
+            need_continue = False
+            for ec in exclude:
+                re_ec = re.compile(ec)
+                res_s = re_ec.search(f_name)
+                if res_s is not None:
+                    log.info("cause by {}, pass {}".format(ec, f_name))
+                    need_continue = True
+                    break
+            split_file_info = self.db_con.get_split_file_info_by_source_name_mpeg(f_name)
+            if split_file_info is not None:
+                log.info("file {} already split.".format(f_name))
+                need_continue = True
+            if need_continue:
+                continue
+            if not os.path.isfile(os.path.join(self.source_dir, f_name)):
+                log.info("file {} not file.".format(f_name))
+                continue
+            #由于不同码率下同一时间长度产生的文件大小不一致，而要控制文件大小，则要控制时间，所以每个片段的时长要计算，而不能取固定值
+            duration = self.cacl_media_duration_by_fixed_size(max_size, f_name)
+            if duration is None or duration < 0:
+                raise Exception("duration {} is wrong for file {}".format(duration, f_name))
+            self.split_ffmpeg_and_encrypt_file(f_name, duration, ffmpeg_param)
+
+    # 保证最终文件大小一定小于max_size
+    def split_ffmpeg_and_encrypt_dir_fixed_size(self, exclude: list, max_size: int, ffmpeg_param: str):
+        l_files = os.listdir(self.source_dir)
+        for f_name in l_files:
+            need_continue = False
+            for ec in exclude:
+                re_ec = re.compile(ec)
+                res_s = re_ec.search(f_name)
+                if res_s is not None:
+                    log.info("cause by {}, pass {}".format(ec, f_name))
+                    need_continue = True
+                    break
+            split_file_info = self.db_con.get_split_file_info_by_source_name_mpeg(f_name)
+            if split_file_info is not None:
+                log.info("file {} already split.".format(f_name))
+                need_continue = True
+            if need_continue:
+                continue
+            if not os.path.isfile(os.path.join(self.source_dir, f_name)):
+                log.info("file {} not file.".format(f_name))
+                continue
+            # 由于不同码率下同一时间长度产生的文件大小不一致，而要控制文件大小，则要控制时间，所以每个片段的时长要计算，而不能取固定值
+            duration = self.cacl_media_duration_by_fixed_size(max_size, f_name)
+            if duration is None or duration < 0:
+                raise Exception("duration {} is wrong for file {}".format(duration, f_name))
+            self.split_ffmpeg_and_encrypt_file_fixed_size(f_name, duration, max_size, ffmpeg_param)
+            # self.generate_thumbnail(os.path.join(self.source_dir, f_name), os.path., 60, 300)
+
+    def cacl_media_duration_by_fixed_size(self, max_size: int, file_name: str):
+        probe: dict = ffmpeg.probe(os.path.join(self.source_dir, file_name))
+        rate = 0
+        for stream in probe.get("streams"):
+            bit_rate_val = stream.get("bit_rate")
+            if bit_rate_val is None:
+                bit_rate_val = 64 * 1000
+            bit_rate = int(bit_rate_val)
+            if bit_rate is None:
+                raise Exception("file {} stream {} bit_rate is None. probe is {}".format(file_name, stream.get("index"), probe))
+            rate += bit_rate
+        duration = 8 * (max_size - 10 * 1024 * 1024) // rate
+        return duration
 
 class YiKeClient:
     client: YiKeAPI
+    thumb_dir_path: str
 
-    def __init__(self, cookies: str = None):
+    def __init__(self, cookies: str = None, thumb_dir_path: str = os.path.join(os.getcwd(), "thumb")):
+        self.thumb_dir_path = thumb_dir_path
+        if not os.path.exists(self.thumb_dir_path):
+            os.mkdir(self.thumb_dir_path)
         if cookies is not None:
             self.client = YiKeAPI(YiKeClient.__cookie_to_dic__(self, cookies))
         else:
@@ -779,21 +1012,49 @@ class YiKeClient:
     def play(self, file_path: str):
         os.popen("ffplay {}".format(file_path))
 
+    def __do_generate_thumbnail(self, in_filename, out_filename, time, width):
+        try:
+            (
+                ffmpeg
+                .input(in_filename, ss=time)
+                .filter('scale', width, -1)
+                .output(out_filename, vframes=1)
+                .overwrite_output()
+                .run(capture_stdout=True, capture_stderr=True)
+            )
+        except ffmpeg.Error as e:
+            log.warning(e.stderr.decode())
+            return
+
+    def generate_thumbnail(self, file_path: str, sep: str, thumb_dir_path: str = os.path.join(os.getcwd(), "thumb")):
+        file_name = os.path.split(file_path)[-1]
+        thumb_path = None
+        if thumb_dir_path is None:
+            thumb_path = self.thumb_dir_path
+        else:
+            thumb_path = thumb_dir_path
+        thumb_file_path = os.path.join(thumb_path, file_name) + ".jpg"
+        self.__do_generate_thumbnail(file_path, thumb_file_path, 60, 300)
+        return thumb_file_path
+
 def check_disk_space(path: str, need_size: int):
     usage = psutil.disk_usage(path.split(os.sep)[0])
     log.info("path {} disk usage {}".format(path, usage))
     return usage.free > need_size
 
 
-# storage use SF or ST (codec and no repeat frame), r18 use STAE
+# <del>storage use SF or ST (codec and no repeat frame), r18 use STAE</del>
+# for performance use CFAE
 if __name__ == '__main__':
     key = sys.argv[1]
     source_dir = sys.argv[2]
     dest_dir = sys.argv[3]
     type = sys.argv[4]  # [E|D|S|C] E encrypt D decrypt S split(can't preview) C combo SF (split with ffmpeg)
     # CF (combo with ffmpeg) ST (translate codec with ffmpeg) CT (combo with ffmpeg equals CF)
-    # SAE(split and encrypt) SAE(decrypt and combo)
-    # SFAE (split with ffmpeg and encrypt) STAE (split translate with ffmpeg and encrypt)
+    # SAE(split and encrypt) CAE(decrypt and combo)
+    # SFAE (split with ffmpeg and encrypt)
+    # CFAE (combo with ffmpeg and dencrypt)
+    # STAE (split translate with ffmpeg and encrypt)
     # CTAE (decrypt and combo translate files with ffmpeg)
     # !!! CF and SF timeline is not accurate
     # YKU (upload to yiKeAlbum)
@@ -814,15 +1075,15 @@ if __name__ == '__main__':
             combo.combo_dir()
         elif type == "SF":
             sf = Spliter(dbcon, source_dir, dest_dir, 0)
-            ffmpeg_param = "ffmpeg -ss %d -t %d -accurate_seek -i \"%s\" -codec copy -avoid_negative_ts 1 \"%s\" -loglevel warning"
-            sf.split_dir_with_ffmpeg([r'*.ini'], int(60 * 1.1), ffmpeg_param)
+            ffmpeg_param = "ffmpeg -ss %d -t %d -accurate_seek -i \"%s\" -codec copy -avoid_negative_ts 1 \"%s\" -loglevel warning -y"
+            sf.split_dir_with_ffmpeg([r'*.ini'], int(60 * 1.1),  99 * 1024 * 1024, ffmpeg_param)
         elif type == "CF" or type == "CT":
             combo = Combo(dbcon, source_dir, dest_dir)
             ffmpeg_param = "ffmpeg -f concat -safe 0 -i %s -c copy -strict -2 %s -loglevel warning"
             combo.combo_dir_with_ffmpeg(ffmpeg_param)
         elif type == "ST":
             st = Spliter(dbcon, source_dir, dest_dir, 0)
-            ffmpeg_param = "ffmpeg -ss %d -t %d -i \"%s\" -c:v h264_qsv -global_quality 10 -c:a aac -strict experimental \"%s\" -loglevel warning"
+            ffmpeg_param = "ffmpeg -ss %d -t %d -i \"%s\" -c:v h264_qsv -global_quality 10 -c:a mp3 -strict experimental \"%s\" -loglevel warning -y"
             st.split_dir_with_translate([r'*.ini'], int(60 * 1.0), ffmpeg_param)
         elif type == "SAE":
             se = SplitAndEncrypt(dbcon, source_dir, dest_dir, key, 99 * 1024 * 1024)
@@ -831,10 +1092,43 @@ if __name__ == '__main__':
             se = SplitAndEncrypt(dbcon, source_dir, dest_dir, key, 99 * 1024 * 1024)
             se.decrypt_and_combo_dir([r'*.ini'])
         elif type == "SFAE":
+            # 转码对于电脑负担还是很大的。所以尽量采用本方式
+            ffmpeg_param = "ffmpeg -ss %d -t %d -accurate_seek -i \"%s\" -codec copy -avoid_negative_ts 1 \"%s\" -loglevel warning -y"
+            sfae = SplitAndEncrypt(dbcon, source_dir, dest_dir, key)
+            sfae.split_ffmpeg_and_encrypt_dir([r'*.ini'], 99 * 1024 * 1024, ffmpeg_param)
+        elif type == "CFAE":
+            """
+import os
+import tempfile
+import ffmpy
+
+# 创建临时文件
+temp_dir = tempfile.mktemp()
+os.mkdir(temp_dir)
+concat_file = os.path.join(temp_dir, 'concat_list.txt')
+
+with open(concat_file, 'w', encoding='utf-8') as f:
+    f.write('\n'.join([
+        'file C:/1.mp4',
+        'file C:/2.mp4',
+        'file C:/3.mp4',
+    ]))
+
+ff = ffmpy.FFmpeg(
+    global_options=['-f', 'concat'],
+    inputs={concat_file: None},
+    outputs={'output.mp4': ['-c', 'copy']}
+)
+
+ff.run()
+            """
+
             raise NotImplementedError()
         elif type == "STAE":
+            print("in cpu platform use:ffmpeg -ss %d -t %d -i %s -c:v libx264 -crf 20 -maxrate 6000k -bufsize 5000k  -c:a copy -strict experimental %s -loglevel warning -y")
+            print("in amd platform use:")
             stae = SplitAndEncrypt(dbcon, source_dir, dest_dir, key)
-            ffmpeg_param = "ffmpeg -ss %d -t %d -i \"%s\" -c:v h264_qsv -global_quality 15 -c:a aac -strict experimental \"%s\" -loglevel warning"
+            ffmpeg_param = "ffmpeg -ss %d -t %d -i \"%s\" -c:v h264_qsv -global_quality 15 -c:a mp3 -strict experimental \"%s\" -loglevel warning -y"
             stae.split_translate_and_encrypt_dir([r'*.ini'], int(60 * 1.0), ffmpeg_param)
         elif type == "CTAE":
             raise NotImplementedError()
