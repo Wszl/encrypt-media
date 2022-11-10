@@ -1170,6 +1170,10 @@ class Main:
             self.uyk_pl_search_index[search_text] = search_index
 
         def slot_pl_play(self):
+            key = self.uyk_pl_key_line_edit.text()
+            if key == "":
+                QtWidgets.QMessageBox.critical(self.parent, "error", "key is required.")
+                return
             pl_file_path = self.uyk_pl_file_path_line_edit.text()
             if pl_file_path == "":
                 dl_item_count = len(self.uyk_dl_client_items_dict)
