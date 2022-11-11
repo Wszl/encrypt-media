@@ -51,7 +51,7 @@ class Main:
         self.module_stae = None
         self.module_ctae = None
         self.module_uyk = None
-        self.module_uyk_thd = None
+        self.work_thd_pool = None
         self.init_ui()
         self.init_modules(self.window, self.app)
 
@@ -86,42 +86,72 @@ class Main:
         self.module_stae = self.ModuleSTAE(window, self.module_setting, self.module_log)
         self.module_ctae = self.ModuleCTAE(window, self.module_setting, self.module_log)
         self.module_uyk = self.ModuleUploadYiKeAlbum(window, self.module_setting, self.module_log)
-        # 最开始没有想到主线程操作ui，子线程进行运算的结构，不想重构了，就全写在这里吧
-        # 工作类的直接父类只能是object，多继承不行。。。导致moudle大部分结构都不对，目前的解决方案是，需要用到多线程的，就直接去掉ModuleBase
-        self.module_uyk_thd = QtCore.QThread(self.window)
-        self.module_uyk.moveToThread(self.module_uyk_thd)
-        self.module_uyk_thd.started.connect(self.module_uyk.slot_start)
-        self.module_uyk_thd.finished.connect(self.slot_ui_uyk_up_start_thd_end)
-        self.module_uyk.uyk_signal_ul_progress_bar.connect(self.slot_ui_uyk_up_progress_bar)
-        self.window.uykStartButton.clicked.connect(self.slot_ui_uyk_up_start_thd)
-
-    def slot_ui_uyk_up_progress_bar(self, args):
-        self.window.uykUploadProgressBar.setValue(self.window.uykUploadProgressBar.value()+args)
-
-    def slot_ui_uyk_up_start_thd(self):
-        self.module_uyk_thd.start()
-        self.window.uykStartButton.setEnabled(False)
-
-    def slot_ui_uyk_up_start_thd_end(self):
-        QtWidgets.QMessageBox.information(self.window, "upload", "upload done.")
-        self.window.uykStartButton.setEnabled(True)
-        self.window.uykUploadProgressBar.setValue(0)
+        self.work_thd_pool = self.ThdModule(self, self.module_log)
 
     def run(self):
         self.window.show()
         sys.exit(self.app.exec())
 
-    class BaseModule:
+    class ThdModule:
+
+        log = None
+        instant = None
+        thd_pool = {}
+        global_progress_bar: QtWidgets.QProgressBar = None
+
+        def __init__(self, instant, log):
+            self.log = log
+            self.instant = instant
+            self.create_thd()
+            self.init_global_widget()
+            self.instant.app.aboutToQuit.connect(self.destory)
+
+        def destory(self):
+            for k, v in self.thd_pool.items():
+                v.exit()
+
+        def create_thd(self):
+            attrs: dict = self.instant.__dict__
+            for k, v in attrs.items():
+                if "module" in k and hasattr(v, "moveToThread"):
+                    thd = QtCore.QThread()
+                    self.thd_pool[k] = thd
+                    self.log.write_log("{} create thd.".format(k))
+                    v.moveToThread(thd)
+                    thd.start()
+
+        def init_global_widget(self):
+            self.global_progress_bar = self.instant.window.globalProgressBar
+            attrs: dict = self.instant.__dict__
+            for k, v in attrs.items():
+                if "module" in k and hasattr(v, "signal_global_progress_rece"):
+                    v.signal_global_progress_rece.connect(self.slot_global_progress_rece)
+                    v.signal_global_msg_box_send.connect(self.slot_global_msg_box_rece)
+
+        def slot_global_progress_rece(self, proc):
+            val = proc * 100
+            if val >= 100:
+                val = 100
+            self.global_progress_bar.setValue(val)
+
+        def slot_global_msg_box_rece(self, title: str, msg: str):
+            QtWidgets.QMessageBox.information(self.instant.window, title, msg)
+
+    class BaseModule(QtCore.QObject):
         parent: QWidget
         setting = None
         log = None
+        signal_global_progress_rece = QtCore.Signal(float)
+        signal_global_msg_box_send = QtCore.Signal(str, str)
 
         def __init__(self, window: QWidget, setting, log):
+            super().__init__()
             self.parent = window
             self.setting = setting
             self.log = log
             self.get_widget()
             self.connect_slots()
+            # self.parent = None
 
         def get_widget(self):
             pass
@@ -178,6 +208,12 @@ class Main:
             self.setting.set_config(q_widget.objectName(), val)
             return val
 
+        def progress_bar_increase(self, proc):
+            self.signal_global_progress_rece.emit(proc)
+
+        def msg_box(self, titile: str, msg: str):
+            self.signal_global_msg_box_send.emit(titile, msg)
+
     class ModuleSetting:
         setting_db_path_tool_btn: QToolButton
         setting_db_path_text_line: QLineEdit
@@ -207,6 +243,7 @@ class Main:
             self.connect_slots()
             self.init_config(self.disk_config_file_name)
             self.app.aboutToQuit.connect(self.write_config)
+            # self.parent = None
 
         def write_config(self):
             self.collect_all_instance_values_to_config()
@@ -841,7 +878,7 @@ class Main:
             self.write_log("unimplemented.")
             self.write_log("done in dir {}".format(self.setting.dest_dir))
 
-    class ModuleUploadYiKeAlbum(QtCore.QObject):
+    class ModuleUploadYiKeAlbum(BaseModule):
         parent: QWidget
         setting = None
         log = None
@@ -879,6 +916,7 @@ class Main:
         uyk_pl_potplayer_path_tool_button: QtWidgets.QToolButton
         uyk_pl_potplayer_path_clear_tool_button: QtWidgets.QToolButton
         uyk_pl_load_db_push_button: QtWidgets.QPushButton
+        uyk_pl_regenerate_album_push_button: QtWidgets.QPushButton
 
         uyk_client_album_fetched = 0
         uyk_client_current_page_album = None
@@ -897,12 +935,13 @@ class Main:
         cache_db = None
 
         def __init__(self, window: QWidget, setting, log):
-            super().__init__(window)
-            self.parent = window
-            self.setting = setting
-            self.log = log
-            self.get_widget()
-            self.connect_slots()
+            # Main.BaseModule.__init__(self, window, setting, log)
+            super().__init__(window, setting, log)
+            # self.parent = window
+            # self.setting = setting
+            # self.log = log
+            # self.get_widget()
+            # self.connect_slots()
             self.cache_db = self.CacheDbCon(self.write_log)
             self.slot_pl_album_select()
 
@@ -941,6 +980,7 @@ class Main:
             self.uyk_pl_potplayer_path_tool_button = self.parent.findChild(QtWidgets.QToolButton, "uykPlPotplayerPathToolButton")
             self.uyk_pl_potplayer_path_clear_tool_button = self.parent.findChild(QtWidgets.QToolButton, "uykPlPotplayerPathClearToolButton")
             self.uyk_pl_load_db_push_button = self.parent.findChild(QtWidgets.QPushButton, "uykPlLoadDbPushButton")
+            self.uyk_pl_regenerate_album_push_button = self.parent.findChild(QtWidgets.QPushButton, "uykPlRegenerateAlbumPushButton")
 
         def connect_slots(self):
             self.uyk_dir_tool_btn.clicked.connect(self.slot_set_dir)
@@ -965,6 +1005,7 @@ class Main:
             self.uyk_pl_potplayer_path_clear_tool_button.clicked.connect(self.slot_pl_potplayer_path_clear)
             self.uyk_pl_load_db_push_button.clicked.connect(self.slot_pl_load_db)
             self.uyk_pl_db_list_widget.itemClicked.connect(self.slot_pl_set_album)
+            self.uyk_pl_regenerate_album_push_button.clicked.connect(self.slot_pl_regenerate_album)
 
         def slot_set_dir(self):
             dir_path = QFileDialog.getExistingDirectory(self.parent)
@@ -993,7 +1034,7 @@ class Main:
             else:
                 album_name = album
             uyk_client.upload_dirs_qt(dir_path, exclude_files, album_name,
-                                      self.uyk_signal_ul_progress_bar)
+                                      self.progress_bar_increase)
             self.write_log("done in dir {}".format(self.setting.dest_dir))
 
         def slot_add_exclude_file(self):
@@ -1172,7 +1213,7 @@ class Main:
         def slot_pl_play(self):
             key = self.uyk_pl_key_line_edit.text()
             if key == "":
-                QtWidgets.QMessageBox.critical(self.parent, "error", "key is required.")
+                self.msg_box("error", "key is required.")
                 return
             pl_file_path = self.uyk_pl_file_path_line_edit.text()
             if pl_file_path == "":
@@ -1221,6 +1262,8 @@ class Main:
                 QtWidgets.QMessageBox.critical(self.parent, "error", "not found in metas.")
                 return
             play_list = []
+            index = 0
+            self.progress_bar_increase(0.01)
             for meta in metas:
                 new_name = meta[2]
                 new_name = new_name.replace("-", "_").replace(" ", "_")
@@ -1242,6 +1285,8 @@ class Main:
                 # uyk_client.play(decrypt_file_path)
                 self.write_log("play {} done".format(file_path))
                 play_list.append(decrypt_file_path)
+                index += 1
+                self.progress_bar_increase(index/len(metas))
             self.__play_media_list_potplayer(play_list)
             self.__set_thumb__(play_list[0])
             return play_list
@@ -1253,7 +1298,7 @@ class Main:
             else:
                 thumb_pic_path = os.path.join(os.getcwd(), "thumb", file_name)
             thumb_pixmap = QtGui.QPixmap(thumb_pic_path)
-            thumb_pixmap.scaled(130, self.uyk_pl_db_pic_label.height(), QtCore.Qt.IgnoreAspectRatio)
+            thumb_pixmap.scaled(130, self.uyk_pl_db_pic_label.height(), QtCore.Qt.KeepAspectRatio)
             self.uyk_pl_db_pic_label.setPixmap(thumb_pixmap)
             self.uyk_pl_db_pic_label.setFixedWidth(130)
             return thumb_pic_path
@@ -1344,7 +1389,7 @@ class Main:
             if os.path.exists(cursor_serial_path):
                 with open(cursor_serial_path, "wb") as f:
                     pickle.dump(self.uyk_dl_client_current_page_item, f)
-            QtWidgets.QMessageBox.information(self.parent, "info", "item has cached.")
+            self.msg_box("info", "item has cached.")
 
         def __cache_yike_items__(self, album: str, file_name: str, item):
             db_item = self.cache_db.get_item_by_file_name(file_name)
@@ -1391,7 +1436,7 @@ class Main:
                 if self.con is not None:
                     return self.con
                 import sqlite3
-                self.con = sqlite3.connect(self.db_path)
+                self.con = sqlite3.connect(self.db_path, check_same_thread=False)
                 cursor = self.con.cursor()
                 try:
                     cursor.execute("select * from items;")
@@ -1472,17 +1517,39 @@ class Main:
                 thumb_pic_path = os.path.join(os.getcwd(), "thumb", thumb_name)
                 if os.path.exists(thumb_pic_path):
                     thumb_pixmap = QtGui.QPixmap(thumb_pic_path)
-                    thumb_pixmap.scaled(130, self.uyk_pl_db_pic_label.height(), QtCore.Qt.IgnoreAspectRatio)
+                    thumb_pixmap.scaled(130, 150, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                    thumb_pixmap.scaled(130, 150)
                     self.uyk_pl_db_pic_label.setPixmap(thumb_pixmap)
                     self.uyk_pl_db_pic_label.setFixedWidth(130)
+                    self.uyk_pl_db_pic_label.setFixedWidth(150)
                     return
             thumb_pixmap = QtGui.QPixmap(os.path.join(os.getcwd(), "assert", "assert-defualt-preview.jpg"))
-            thumb_pixmap.scaled(130, self.uyk_pl_db_pic_label.height(), QtCore.Qt.IgnoreAspectRatio)
+            thumb_pixmap.scaled(130, 150, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
             self.uyk_pl_db_pic_label.setPixmap(thumb_pixmap)
             self.uyk_pl_db_pic_label.setFixedWidth(130)
+            self.uyk_pl_db_pic_label.setFixedWidth(150)
 
+        pl_generate_album_time = 0
+
+        def slot_pl_regenerate_album(self):
+            items = self.uyk_pl_db_list_widget.selectedItems()
+            if items is None or len(items) == 0:
+                self.msg_box("info", "please select item first.")
+                return
+            file_name = items[0].text().split("#")[-1]
+            f = self.setting.db_con.list_meta_by_source_name_prefix_for_one_video(file_name)
+            media_path = f[0][2].replace("-", "_").replace(" ", "_") + "de"
+            self.pl_generate_album_time += 5
+            cookies = self.uyk_cookies_plain_text_edit.toPlainText()
+            self.uyk_client = self.__get_uky_client__(cookies)
+            preview_dir = os.path.join(os.getcwd(), "preview")
+            self.uyk_client.generate_thumbnail(os.path.join(preview_dir, media_path), os.sep, time=self.pl_generate_album_time)
+            self.slot_pl_set_album(items[0])
 
 
 if __name__ == '__main__':
-    gui = Main()
-    gui.run()
+    try:
+        gui = Main()
+        gui.run()
+    except Exception as e:
+        raise e

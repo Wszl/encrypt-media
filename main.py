@@ -18,7 +18,7 @@ from pybaiduphoto import API as YiKeAPI
 
 if not os.path.exists("./logs"):
     os.mkdir("./logs")
-log_handle = TimedRotatingFileHandler("./logs/main.log", when="M")
+log_handle = TimedRotatingFileHandler("./logs/main.log", when="D")
 console_log_handle = logging.StreamHandler()
 console_log_handle.setLevel(logging.INFO)
 log = logging.getLogger("main")
@@ -162,7 +162,7 @@ class DbCon:
     def get_db_con(self):
         if self.con is not None:
             return self.con
-        self.con = sqlite3.connect(self.db_path)
+        self.con = sqlite3.connect(self.db_path, check_same_thread=False)
         cursor = self.con.cursor()
         try:
             cursor.execute("select * from meta_info;")
@@ -978,7 +978,7 @@ class YiKeClient:
     def list_page(self, type_name: str = "Item", cursor=None):
         return self.client.get_self_1page(type_name, cursor)
 
-    def upload_dirs(self, dir: str, exclude: list = None, album_name=None, qt_progress_signal=None):
+    def upload_dirs(self, dir: str, exclude: list = None, album_name=None, method_progress_bar_update=None):
         l_files: list[str] = os.listdir(dir)
         for f_name in l_files:
             need_continue = False
@@ -992,13 +992,15 @@ class YiKeClient:
             if need_continue:
                 continue
         log.info("start upload dir {} to yiKeAlbum".format(dir))
+        index = 0
         for fn in l_files:
             self.upload_file(os.path.join(dir, fn), album_name)
-            if qt_progress_signal is not None:
-                qt_progress_signal.emit(int(1 / len(l_files) * 100))
+            if method_progress_bar_update is not None:
+                index += 1
+                method_progress_bar_update(index / len(l_files))
 
-    def upload_dirs_qt(self, dir: str, exclude: list = None, album_name=None, qt_progress_signal=None):
-        self.upload_dirs(dir, exclude, album_name, qt_progress_signal)
+    def upload_dirs_qt(self, dir: str, exclude: list = None, album_name=None, method_progress_bar_update=None):
+        self.upload_dirs(dir, exclude, album_name, method_progress_bar_update)
 
     def download(self, item, dest_dir: str):
         item.download(dest_dir)
@@ -1026,7 +1028,8 @@ class YiKeClient:
             log.warning(e.stderr.decode())
             return
 
-    def generate_thumbnail(self, file_path: str, sep: str, thumb_dir_path: str = os.path.join(os.getcwd(), "thumb")):
+    def generate_thumbnail(self, file_path: str, sep: str, thumb_dir_path: str = os.path.join(os.getcwd(), "thumb"),
+                           time: int = 60):
         file_name = os.path.split(file_path)[-1]
         thumb_path = None
         if thumb_dir_path is None:
@@ -1034,7 +1037,7 @@ class YiKeClient:
         else:
             thumb_path = thumb_dir_path
         thumb_file_path = os.path.join(thumb_path, file_name) + ".jpg"
-        self.__do_generate_thumbnail(file_path, thumb_file_path, 60, 300)
+        self.__do_generate_thumbnail(file_path, thumb_file_path, time, 300)
         return thumb_file_path
 
 def check_disk_space(path: str, need_size: int):

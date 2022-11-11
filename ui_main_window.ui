@@ -53,8 +53,8 @@
         <rect>
          <x>0</x>
          <y>0</y>
-         <width>505</width>
-         <height>419</height>
+         <width>191</width>
+         <height>132</height>
         </rect>
        </property>
        <attribute name="label">
@@ -146,8 +146,8 @@
         <rect>
          <x>0</x>
          <y>0</y>
-         <width>505</width>
-         <height>419</height>
+         <width>275</width>
+         <height>322</height>
         </rect>
        </property>
        <attribute name="label">
@@ -806,7 +806,7 @@
          <x>0</x>
          <y>0</y>
          <width>505</width>
-         <height>419</height>
+         <height>389</height>
         </rect>
        </property>
        <attribute name="label">
@@ -1158,6 +1158,13 @@
                         </property>
                        </widget>
                       </item>
+                      <item row="0" column="0">
+                       <widget class="QPushButton" name="uykPlRegenerateAlbumPushButton">
+                        <property name="text">
+                         <string>Regenerate Alb</string>
+                        </property>
+                       </widget>
+                      </item>
                      </layout>
                     </widget>
                    </item>
@@ -1179,6 +1186,12 @@
                       </item>
                       <item>
                        <widget class="QLabel" name="uykPlDbPicLabel">
+                        <property name="minimumSize">
+                         <size>
+                          <width>130</width>
+                          <height>150</height>
+                         </size>
+                        </property>
                         <property name="maximumSize">
                          <size>
                           <width>9999</width>
@@ -1253,8 +1266,8 @@
         <rect>
          <x>0</x>
          <y>0</y>
-         <width>505</width>
-         <height>419</height>
+         <width>98</width>
+         <height>89</height>
         </rect>
        </property>
        <attribute name="label">
@@ -1270,6 +1283,25 @@
         </item>
        </layout>
       </widget>
+     </widget>
+    </item>
+    <item row="1" column="0">
+     <widget class="QProgressBar" name="globalProgressBar">
+      <property name="enabled">
+       <bool>true</bool>
+      </property>
+      <property name="value">
+       <number>0</number>
+      </property>
+      <property name="alignment">
+       <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
+      </property>
+      <property name="invertedAppearance">
+       <bool>false</bool>
+      </property>
+      <property name="format">
+       <string>%p%</string>
+      </property>
      </widget>
     </item>
    </layout>
