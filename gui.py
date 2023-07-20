@@ -10,6 +10,7 @@ import time
 import traceback
 
 import potplayer as potplayer
+import vlc
 from PySide6 import QtWidgets, QtCore, QtGui
 from PySide6.QtCore import QFile, QIODevice
 from PySide6.QtGui import QBrush, QColor
@@ -326,7 +327,7 @@ class Main:
             combo_boxs: list[QtWidgets.QComboBox] = self.parent.findChildren(QtWidgets.QComboBox)
             for cb in combo_boxs:
                 val = self.get_config(cb.objectName())
-                if val is not None and val != "None":
+                if val is not None and val != "None" and cb.findText(val) == -1:
                     cb.addItem(val)
                     cb.setCurrentText(val)
             self.db_path = self.get_config("settingLineTextDbPath")
@@ -917,6 +918,7 @@ class Main:
         uyk_pl_potplayer_path_clear_tool_button: QtWidgets.QToolButton
         uyk_pl_load_db_push_button: QtWidgets.QPushButton
         uyk_pl_regenerate_album_push_button: QtWidgets.QPushButton
+        uyk_pl_player_select_combo_box: QtWidgets.QComboBox
 
         uyk_client_album_fetched = 0
         uyk_client_current_page_album = None
@@ -933,6 +935,8 @@ class Main:
 
         play_file_dict = None
         cache_db = None
+        vlc_play_list: vlc.MediaList = None
+        vlc_player: vlc.MediaListPlayer = None
 
         def __init__(self, window: QWidget, setting, log):
             # Main.BaseModule.__init__(self, window, setting, log)
@@ -981,6 +985,7 @@ class Main:
             self.uyk_pl_potplayer_path_clear_tool_button = self.parent.findChild(QtWidgets.QToolButton, "uykPlPotplayerPathClearToolButton")
             self.uyk_pl_load_db_push_button = self.parent.findChild(QtWidgets.QPushButton, "uykPlLoadDbPushButton")
             self.uyk_pl_regenerate_album_push_button = self.parent.findChild(QtWidgets.QPushButton, "uykPlRegenerateAlbumPushButton")
+            self.uyk_pl_player_select_combo_box = self.parent.findChild(QtWidgets.QComboBox, "uykPlPlayerSelectComboBox")
 
         def connect_slots(self):
             self.uyk_dir_tool_btn.clicked.connect(self.slot_set_dir)
@@ -1264,32 +1269,72 @@ class Main:
             play_list = []
             index = 0
             self.progress_bar_increase(0.01)
-            for meta in metas:
-                new_name = meta[2]
-                new_name = new_name.replace("-", "_").replace(" ", "_")
-                local_item = self.cache_db.get_item_by_file_name(new_name)
-                if local_item is None:
-                    self.write_log("item {} not found in album.".format(item_title))
-                    QtWidgets.QMessageBox.critical(self.parent, "error", "item {} not found in album.".format(item_title))
-                    return
-                self.write_log("start download {}.".format(local_item[2]))
-                item = self.uyk_dl_client_items_dict.get(local_item[2])
-                file_path = os.path.join(preview_dir, new_name)
-                if not os.path.exists(file_path):
-                    uyk_client.download(item, preview_dir)
-                    self.write_log("downloading in {}".format(file_path))
-                decrypt_file_path = file_path + "de"
-                if not os.path.exists(decrypt_file_path):
-                    self.__decrypt__(file_path, decrypt_file_path)
-                    self.write_log("decrypt in {}".format(decrypt_file_path))
-                # uyk_client.play(decrypt_file_path)
-                self.write_log("play {} done".format(file_path))
-                play_list.append(decrypt_file_path)
-                index += 1
-                self.progress_bar_increase(index/len(metas))
-            self.__play_media_list_potplayer(play_list)
-            self.__set_thumb__(play_list[0])
+            selected_player = self.uyk_pl_player_select_combo_box.currentText()
+            if selected_player == "VLC":
+                for meta in metas:
+                    new_name = meta[2]
+                    new_name = new_name.replace("-", "_").replace(" ", "_")
+                    local_item = self.cache_db.get_item_by_file_name(new_name)
+                    if local_item is None:
+                        self.write_log("item {} not found in album.".format(item_title))
+                        self.msg_box("error", "item {} not found in album.".format(item_title))
+                        return
+                    self.write_log("start download {}.".format(local_item[2]))
+                    item = self.uyk_dl_client_items_dict.get(local_item[2])
+                    file_path = os.path.join(preview_dir, new_name)
+                    if not os.path.exists(file_path):
+                        uyk_client.download(item, preview_dir)
+                        self.write_log("downloading in {}".format(file_path))
+                    decrypt_file_path = file_path + "de"
+                    if not os.path.exists(decrypt_file_path):
+                        self.__decrypt__(file_path, decrypt_file_path)
+                        self.write_log("decrypt in {}".format(decrypt_file_path))
+                    # uyk_client.play(decrypt_file_path)
+                    if self.vlc_player is not None and self.vlc_player.is_playing():
+                        self.__add_media_list_vlc(decrypt_file_path)
+                    else:
+                        self.__play_media_list_vlc([decrypt_file_path])
+                        self.__set_thumb__(decrypt_file_path)
+                    self.write_log("play {} done".format(file_path))
+                    play_list.append(decrypt_file_path)
+                    index += 1
+                    self.progress_bar_increase(index/len(metas))
+            else:
+                for meta in metas:
+                    new_name = meta[2]
+                    new_name = new_name.replace("-", "_").replace(" ", "_")
+                    local_item = self.cache_db.get_item_by_file_name(new_name)
+                    if local_item is None:
+                        self.write_log("item {} not found in album.".format(item_title))
+                        self.msg_box("error", "item {} not found in album.".format(item_title))
+                        return
+                    self.write_log("start download {}.".format(local_item[2]))
+                    item = self.uyk_dl_client_items_dict.get(local_item[2])
+                    file_path = os.path.join(preview_dir, new_name)
+                    if not os.path.exists(file_path):
+                        uyk_client.download(item, preview_dir)
+                        self.write_log("downloading in {}".format(file_path))
+                    decrypt_file_path = file_path + "de"
+                    if not os.path.exists(decrypt_file_path):
+                        self.__decrypt__(file_path, decrypt_file_path)
+                        self.write_log("decrypt in {}".format(decrypt_file_path))
+                    # uyk_client.play(decrypt_file_path)
+                    self.write_log("play {} done".format(file_path))
+                    play_list.append(decrypt_file_path)
+                    index += 1
+                    self.progress_bar_increase(index/len(metas))
+            # self.__play_media_list_potplayer(play_list)
+            # self.__play_media_list_vlc(play_list)
+                self.__do_player__(play_list)
+                self.__set_thumb__(play_list[0])
             return play_list
+
+        def __do_player__(self, media_path_list: list):
+            selected_player = self.uyk_pl_player_select_combo_box.currentText()
+            if selected_player == "VLC":
+                self.__play_media_list_vlc(media_path_list)
+            else:
+                self.__play_media_list_potplayer(media_path_list)
 
         def __set_thumb__(self, media_path: str):
             file_name = os.path.split(media_path)[-1]
@@ -1309,6 +1354,22 @@ class Main:
             pl.add_many(media_path_list)
             pl.dump("preview/potplayer_list")
             potplayer.run("preview/potplayer_list.dpl")
+
+        def __play_media_list_vlc(self, media_path_list: list):
+            ml: vlc.MediaList = vlc.MediaList()
+            # ml.add_media("C:\\Users\\Wszl\\Desktop\\Video.mp4")
+            self.vlc_play_list = ml
+            mlp: vlc.MediaListPlayer = vlc.MediaListPlayer()
+            self.vlc_player = mlp
+            mlp.set_media_list(ml)
+            for m in media_path_list:
+                ml.add_media(m)
+            mlp.set_media_list(ml)
+            mlp.play()
+
+        def __add_media_list_vlc(self, mrl: str):
+            self.vlc_play_list.add_media(mrl)
+
         def __get_uky_client__(self, cookies):
             if self.uyk_client is None:
                 self.uyk_client = main.YiKeClient(cookies)

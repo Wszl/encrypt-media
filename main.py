@@ -3,6 +3,7 @@ import datetime
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import uuid
@@ -434,6 +435,7 @@ class Spliter:
         start_time = 0
         new_filename_ary = []
         media_duration = self.get_media_duration_time(origin_file_path)
+        calc_duration = self.cacl_media_duration_by_fixed_size(max_size, origin_file_path)
         file_count_num = int(media_duration // duration) + 1
         if media_duration <= duration:
             log.info("media duration is {} , lt {}.".format(media_duration, duration))
@@ -452,23 +454,51 @@ class Spliter:
             is_file_size_ok = True
             exec_time = 0
             real_duration = duration
+            last_file_size = 0
+            one_sec_size = 0
             while is_file_size_ok:
                 # 众多ffmpeg的库无法实现 -ss参数前置，所以直接使用命令行
-                # +1s 确保不漏掉任何frame
                 if exec_time > 0:
                     log.info("reduce duration for file {} time {}".format(new_filename, exec_time))
-                real_duration = duration - (exec_time * 10)
+                real_duration = calc_duration + exec_time
                 if real_duration <= 0:
                     log.warning("file {} real_duration is {} exception.".format(new_filename, real_duration))
                     raise Exception("file {} real_duration is {} exception.".format(new_filename, real_duration))
-                ffmpeg_cmd = ffmpeg_param % (start_time, real_duration + 1, origin_file_path, new_file_path)
+                ffmpeg_cmd = ffmpeg_param % (start_time, real_duration, origin_file_path, new_file_path)
                 result = os.popen(ffmpeg_cmd)
                 ret_msg = result.read()
                 ret_suc = result.close()
                 if ret_suc is not None:
                     raise Exception(str(ret_suc) + ret_msg)
-                is_file_size_ok = os.path.getsize(new_file_path) >= max_size
-                exec_time += 1
+                cur_file_size = os.path.getsize(new_file_path)
+                is_file_size_ok = not (cur_file_size + one_sec_size) >= max_size
+                if not is_file_size_ok:
+                    break
+                if last_file_size != 0 and cur_file_size != last_file_size:
+                    one_sec_size = cur_file_size - last_file_size
+                    addtion_sec = int((max_size - cur_file_size) / one_sec_size)
+                    if addtion_sec > (calc_duration / 2):
+                        exec_time += calc_duration / 2
+                    else:
+                        exec_time += addtion_sec
+                elif cur_file_size == last_file_size and is_file_size_ok:
+                    if real_duration > media_duration:
+                        # 计算时间比实际时间长，直接复制
+                        new_filename_ary.append(new_filename)
+                        self.db_con.insert_split_file_info_mpeg(file_name, "#".join(new_filename_ary),
+                                                                os.path.getsize(origin_file_path),
+                                                                datetime.datetime.now())
+                        return new_filename_ary
+                    elif start_time + real_duration > media_duration:
+                        new_filename_ary.append(new_filename)
+                        self.db_con.insert_split_file_info_mpeg(file_name, "#".join(new_filename_ary),
+                                                                os.path.getsize(origin_file_path),
+                                                                datetime.datetime.now())
+                        # 计算时间分块时间已经到末尾，最大时长
+                        return new_filename_ary
+                    else:
+                        exec_time += 1
+                last_file_size = cur_file_size
             log.info("file {} split result  {}".format(file_name, ret_msg))
             start_time += real_duration
             new_filename_ary.append(new_filename)
@@ -535,10 +565,14 @@ class Spliter:
         return duration
 
     def get_media_duration_time(self, file_path: str):
-        result = os.popen("ffprobe -i \"%s\" -show_entries format=duration -v quiet -of csv=\"p=0\"" % file_path)
-        result_plant = result.readlines().pop(0)
-        result.close()
-        return float(result_plant.strip())
+        try:
+            result = os.popen("ffprobe -i \"%s\" -show_entries format=duration -v quiet -of csv=\"p=0\"" % file_path)
+            result_plant = result.readlines().pop(0)
+            result.close()
+            return float(result_plant.strip())
+        except Exception as e:
+            log.error("ffprobe error file{}, exception{}".format(file_path, e))
+            raise e
 
     def split_dir_with_translate(self, exclude: list, duration: int, ffmpeg_param: str):
         l_files = os.listdir(self.source_dir)
@@ -828,6 +862,7 @@ class SplitAndEncrypt:
     # return ffmpeg files dir
     def split_ffmpeg_and_encrypt_file(self, file_name: str, duration: int, ffmpeg_param: str) -> str:
         tmp_dir: str = os.path.join(self.source_dir, "tmp")
+        shutil.rmtree(tmp_dir)
         if not os.path.exists(tmp_dir):
             os.mkdir(tmp_dir)
         s: Spliter = Spliter(self.db_con, self.source_dir, tmp_dir, 0)
@@ -840,10 +875,11 @@ class SplitAndEncrypt:
 
     def split_ffmpeg_and_encrypt_file_fixed_size(self, file_name: str, duration: int, max_size: int, ffmpeg_param: str) -> str:
         tmp_dir: str = os.path.join(self.source_dir, "tmp")
+        shutil.rmtree(tmp_dir)
         if not os.path.exists(tmp_dir):
             os.mkdir(tmp_dir)
         s: Spliter = Spliter(self.db_con, self.source_dir, tmp_dir, 0)
-        split_file_name_list: list[str] = s.split_file_with_ffmpeg_fixed_size(file_name, duration, max_size, ffmpeg_param)
+        split_file_name_list: list[str] = s.split_file_with_ffmpeg_fixed_size(file_name, max_size, duration, ffmpeg_param)
         log.info("split file list is {}".format(split_file_name_list))
         self.encrypt.encrypt_files_with_subfix(self.encrypt_key, tmp_dir, self.dest_dir)
         log.info("encrypt {} done, delete source files".format(split_file_name_list))
@@ -912,6 +948,14 @@ class SplitAndEncrypt:
     def split_ffmpeg_and_encrypt_dir_fixed_size(self, exclude: list, max_size: int, ffmpeg_param: str):
         l_files = os.listdir(self.source_dir)
         for f_name in l_files:
+            if f_name.endswith("part"):
+                log.info("file {} is not video.".format(f_name))
+                continue
+            new_f_name = handle_file_name(f_name)
+            if new_f_name is not None:
+                log.info("rename file {} to {}".format(f_name, new_f_name))
+                os.rename(os.path.join(self.source_dir, f_name), os.path.join(self.source_dir, new_f_name))
+                f_name = new_f_name
             need_continue = False
             for ec in exclude:
                 re_ec = re.compile(ec)
@@ -934,7 +978,7 @@ class SplitAndEncrypt:
             if duration is None or duration < 0:
                 raise Exception("duration {} is wrong for file {}".format(duration, f_name))
             self.split_ffmpeg_and_encrypt_file_fixed_size(f_name, duration, max_size, ffmpeg_param)
-            # self.generate_thumbnail(os.path.join(self.source_dir, f_name), os.path., 60, 300)
+            #self.generate_thumbnail(os.path.join(self.source_dir, f_name), os.path., 60, 300)
 
     def cacl_media_duration_by_fixed_size(self, max_size: int, file_name: str):
         probe: dict = ffmpeg.probe(os.path.join(self.source_dir, file_name))
@@ -1046,6 +1090,35 @@ def check_disk_space(path: str, need_size: int):
     return usage.free > need_size
 
 
+def handle_file_name(s):
+    rep_str = repeated(s)
+    new_s = s
+    while rep_str is not None and len(rep_str) > 3:
+        new_s = new_s.replace(rep_str, "", new_s.count(rep_str) - 1)
+        rep_str = repeated(new_s)
+    new_s = new_s.strip()
+    new_s = new_s.replace("黄色仓库-hsck.net", "")
+    new_s = new_s.replace("迅雷", "")
+    new_s = new_s.replace("下载", "")
+    new_s = new_s.replace("详情介绍", "")
+    new_s = new_s.replace("在线观看", "")
+    new_s = new_s.replace("-", "")
+    new_s = new_s.strip()
+    return new_s
+def repeated(s):
+    max_len_rep_str = ""
+    for start_index in range(0, int(len(s) / 2)):
+        for end_index in range(1, int(len(s) / 2)):
+            t = s[start_index: end_index]
+            if s.count(t) >= 2:
+                max_len_rep_str = t
+            else:
+                return max_len_rep_str
+    return None
+
+
+
+
 # <del>storage use SF or ST (codec and no repeat frame), r18 use STAE</del>
 # for performance use CFAE
 if __name__ == '__main__':
@@ -1079,7 +1152,7 @@ if __name__ == '__main__':
         elif type == "SF":
             sf = Spliter(dbcon, source_dir, dest_dir, 0)
             ffmpeg_param = "ffmpeg -ss %d -t %d -accurate_seek -i \"%s\" -codec copy -avoid_negative_ts 1 \"%s\" -loglevel warning -y"
-            sf.split_dir_with_ffmpeg([r'*.ini'], int(60 * 1.1),  99 * 1024 * 1024, ffmpeg_param)
+            sf.split_dir_with_ffmpeg([r'*.ini'], int(60 * 1.1), ffmpeg_param)
         elif type == "CF" or type == "CT":
             combo = Combo(dbcon, source_dir, dest_dir)
             ffmpeg_param = "ffmpeg -f concat -safe 0 -i %s -c copy -strict -2 %s -loglevel warning"
