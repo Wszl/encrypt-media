@@ -440,6 +440,8 @@ class Spliter:
         if media_duration <= duration:
             log.info("media duration is {} , lt {}.".format(media_duration, duration))
             new_filename_ary.append(file_name)
+            shutil.copyfile(origin_file_path, os.path.join(self.dest_dir, file_name))
+            return new_filename_ary
         else:
             log.info("file split to {} .".format(file_count_num))
         for i in range(0, file_count_num):
@@ -451,39 +453,55 @@ class Spliter:
             log.info("new file is {}. index {} for {}".format(new_filename, file_index, origin_filename))
             new_file_path = os.path.join(self.dest_dir, new_filename)
             log.info("new file path in {}".format(new_file_path))
-            is_file_size_ok = True
+            is_file_size_ok = False
             exec_time = 0
             real_duration = duration
             last_file_size = 0
             one_sec_size = 0
-            while is_file_size_ok:
+            is_first_round = True
+            exec_time_list = []
+            while not is_file_size_ok:
                 # 众多ffmpeg的库无法实现 -ss参数前置，所以直接使用命令行
-                if exec_time > 0:
-                    log.info("reduce duration for file {} time {}".format(new_filename, exec_time))
-                real_duration = calc_duration + exec_time
-                if real_duration <= 0:
-                    log.warning("file {} real_duration is {} exception.".format(new_filename, real_duration))
-                    raise Exception("file {} real_duration is {} exception.".format(new_filename, real_duration))
-                ffmpeg_cmd = ffmpeg_param % (start_time, real_duration, origin_file_path, new_file_path)
-                result = os.popen(ffmpeg_cmd)
-                ret_msg = result.read()
-                ret_suc = result.close()
-                if ret_suc is not None:
-                    raise Exception(str(ret_suc) + ret_msg)
-                cur_file_size = os.path.getsize(new_file_path)
-                is_file_size_ok = not (cur_file_size + one_sec_size) >= max_size
-                if not is_file_size_ok:
-                    break
-                if last_file_size != 0 and cur_file_size != last_file_size:
+                if exec_time != 0 or is_first_round:
+                    log.info("change duration for file {} time {}".format(new_filename, exec_time))
+                    real_duration = calc_duration + exec_time
+                    if real_duration <= 0:
+                        log.warning("file {} real_duration is {} exception.".format(new_filename, real_duration))
+                        raise Exception("file {} real_duration is {} exception.".format(new_filename, real_duration))
+                    ffmpeg_cmd = ffmpeg_param % (start_time, real_duration, origin_file_path, new_file_path)
+                    result = os.popen(ffmpeg_cmd)
+                    ret_msg = result.read()
+                    ret_suc = result.close()
+                    if ret_suc is not None:
+                        raise Exception(str(ret_suc) + ret_msg)
+                    #计算切片文件大小是否符合maxsize，误差1s
+                    cur_file_size = os.path.getsize(new_file_path)
+                    file_size_check = (cur_file_size) - max_size
+                    is_file_size_ok = False
+                    if abs(file_size_check) <= one_sec_size and file_size_check >= 0:#差距小于1s
+                        break
+                    if exec_time in exec_time_list:
+                        log.info("stop loop 1s file size split.")
+                        break
+                    else:
+                        is_file_size_ok = False
+                    is_first_round = False
+                    exec_time_list.append(exec_time)
+                if last_file_size != 0 and cur_file_size != last_file_size:#利用文件大小差距计算增减时间
                     one_sec_size = cur_file_size - last_file_size
                     addtion_sec = int((max_size - cur_file_size) / one_sec_size)
-                    if addtion_sec > (calc_duration / 2):
-                        exec_time += calc_duration / 2
+                    if abs(addtion_sec) > (calc_duration / 2):
+                        if addtion_sec >= 0:
+                            exec_time += calc_duration / 2
+                        else:
+                            exec_time -= calc_duration / 2
+                    elif addtion_sec == 0:
+                        exec_time += 1
                     else:
                         exec_time += addtion_sec
-                elif cur_file_size == last_file_size and is_file_size_ok:
+                elif cur_file_size == last_file_size and not is_file_size_ok:
                     if real_duration > media_duration:
-                        # 计算时间比实际时间长，直接复制
+                        # 最个一个片段： 计算时间比实际时间长，直接复制
                         new_filename_ary.append(new_filename)
                         self.db_con.insert_split_file_info_mpeg(file_name, "#".join(new_filename_ary),
                                                                 os.path.getsize(origin_file_path),
@@ -494,7 +512,7 @@ class Spliter:
                         self.db_con.insert_split_file_info_mpeg(file_name, "#".join(new_filename_ary),
                                                                 os.path.getsize(origin_file_path),
                                                                 datetime.datetime.now())
-                        # 计算时间分块时间已经到末尾，最大时长
+                        # 计算时间分块时;间已经到末尾，最大时长
                         return new_filename_ary
                     else:
                         exec_time += 1
@@ -875,7 +893,8 @@ class SplitAndEncrypt:
 
     def split_ffmpeg_and_encrypt_file_fixed_size(self, file_name: str, duration: int, max_size: int, ffmpeg_param: str) -> str:
         tmp_dir: str = os.path.join(self.source_dir, "tmp")
-        shutil.rmtree(tmp_dir)
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir)
         if not os.path.exists(tmp_dir):
             os.mkdir(tmp_dir)
         s: Spliter = Spliter(self.db_con, self.source_dir, tmp_dir, 0)
@@ -945,17 +964,18 @@ class SplitAndEncrypt:
             self.split_ffmpeg_and_encrypt_file(f_name, duration, ffmpeg_param)
 
     # 保证最终文件大小一定小于max_size
-    def split_ffmpeg_and_encrypt_dir_fixed_size(self, exclude: list, max_size: int, ffmpeg_param: str):
+    def split_ffmpeg_and_encrypt_dir_fixed_size(self, exclude: list, max_size: int, ffmpeg_param: str, convert_file_name=False):
         l_files = os.listdir(self.source_dir)
         for f_name in l_files:
             if f_name.endswith("part"):
                 log.info("file {} is not video.".format(f_name))
                 continue
-            new_f_name = handle_file_name(f_name)
-            if new_f_name is not None:
-                log.info("rename file {} to {}".format(f_name, new_f_name))
-                os.rename(os.path.join(self.source_dir, f_name), os.path.join(self.source_dir, new_f_name))
-                f_name = new_f_name
+            if convert_file_name:
+                new_f_name = handle_file_name(f_name)
+                if new_f_name is not None:
+                    log.info("rename file {} to {}".format(f_name, new_f_name))
+                    os.rename(os.path.join(self.source_dir, f_name), os.path.join(self.source_dir, new_f_name))
+                    f_name = new_f_name
             need_continue = False
             for ec in exclude:
                 re_ec = re.compile(ec)
@@ -1090,7 +1110,7 @@ def check_disk_space(path: str, need_size: int):
     return usage.free > need_size
 
 
-def handle_file_name(s):
+def c(s):
     rep_str = repeated(s)
     new_s = s
     while rep_str is not None and len(rep_str) > 3:

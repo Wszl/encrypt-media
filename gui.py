@@ -87,7 +87,8 @@ class Main:
         self.module_stae = self.ModuleSTAE(window, self.module_setting, self.module_log)
         self.module_ctae = self.ModuleCTAE(window, self.module_setting, self.module_log)
         self.module_uyk = self.ModuleUploadYiKeAlbum(window, self.module_setting, self.module_log)
-        self.work_thd_pool = self.ThdModule(self, self.module_log)
+        # TODO 原有module中有大量直接操作ui的代码，不能用下属线程启动方式
+        # self.work_thd_pool = self.ThdModule(self, self.module_log)
 
     def run(self):
         self.window.show()
@@ -760,6 +761,7 @@ class Main:
             self.sfae_exclude_files_list_widget = self.parent.findChild(QtWidgets.QListWidget,
                                                                         "sfaeExcludeFilesListWidget")
             self.sfae_start_btn = self.parent.findChild(QtWidgets.QPushButton, "sfaeStartButton")
+            self.sfae_tr_cb = self.parent.findChild(QtWidgets.QCheckBox, "sfaeTRCheckBox")
 
         def connect_slots(self):
             self.sfae_start_btn.clicked.connect(self.slot_start)
@@ -778,12 +780,13 @@ class Main:
                 return
             max_size = int(self.sfae_max_size_spin_box.text()) * 1024 * 1024
             exclude_files = []
+            is_check_name_repeate = self.sfae_tr_cb.isChecked()
             for i in range(0, self.sfae_exclude_files_list_widget.count()):
                 exclude_files.append(self.sfae_exclude_files_list_widget.item(i).text())
             stae = main.SplitAndEncrypt(self.setting.db_con, self.setting.source_dir, self.setting.dest_dir, key)
             self.write_log("start in dir {}".format(self.setting.source_dir))
             try:
-                stae.split_ffmpeg_and_encrypt_dir_fixed_size(exclude_files, max_size, ffmpeg_cmd)
+                stae.split_ffmpeg_and_encrypt_dir_fixed_size(exclude_files, max_size, ffmpeg_cmd, is_check_name_repeate)
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self.parent, "error", str(e))
                 self.write_log(str(e.args))

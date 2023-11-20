@@ -46,7 +46,7 @@
     <item row="0" column="0">
      <widget class="QToolBox" name="toolBox">
       <property name="currentIndex">
-       <number>2</number>
+       <number>1</number>
       </property>
       <widget class="QWidget" name="page_3">
        <property name="geometry">
@@ -163,7 +163,7 @@
            </sizepolicy>
           </property>
           <property name="currentIndex">
-           <number>4</number>
+           <number>9</number>
           </property>
           <widget class="QWidget" name="tab">
            <attribute name="title">
@@ -635,13 +635,6 @@
             <string>split with ffmpeg and encrypt</string>
            </attribute>
            <layout class="QGridLayout" name="gridLayout_13">
-            <item row="5" column="2">
-             <widget class="QPushButton" name="sfaeStartButton">
-              <property name="text">
-               <string>Start</string>
-              </property>
-             </widget>
-            </item>
             <item row="1" column="0">
              <widget class="QLabel" name="label_35">
               <property name="text">
@@ -649,27 +642,10 @@
               </property>
              </widget>
             </item>
-            <item row="4" column="0">
-             <widget class="QLabel" name="label_37">
+            <item row="6" column="2">
+             <widget class="QPushButton" name="sfaeStartButton">
               <property name="text">
-               <string>Exclude Files:</string>
-              </property>
-             </widget>
-            </item>
-            <item row="2" column="0">
-             <widget class="QLabel" name="label_38">
-              <property name="text">
-               <string>FFmpeg CMD:</string>
-              </property>
-             </widget>
-            </item>
-            <item row="2" column="2">
-             <widget class="QPlainTextEdit" name="sfaeFfmpegCmdPlainTextEdit"/>
-            </item>
-            <item row="3" column="0">
-             <widget class="QLabel" name="label_36">
-              <property name="text">
-               <string>MaxSize(MB)</string>
+               <string>Start</string>
               </property>
              </widget>
             </item>
@@ -683,6 +659,32 @@
               </property>
              </widget>
             </item>
+            <item row="3" column="0">
+             <widget class="QLabel" name="label_36">
+              <property name="text">
+               <string>MaxSize(MB)</string>
+              </property>
+             </widget>
+            </item>
+            <item row="5" column="0">
+             <widget class="QLabel" name="label_37">
+              <property name="text">
+               <string>Exclude Files:</string>
+              </property>
+             </widget>
+            </item>
+            <item row="2" column="2">
+             <widget class="QPlainTextEdit" name="sfaeFfmpegCmdPlainTextEdit"/>
+            </item>
+            <item row="5" column="2">
+             <widget class="QListWidget" name="sfaeExcludeFilesListWidget">
+              <item>
+               <property name="text">
+                <string>.*ini</string>
+               </property>
+              </item>
+             </widget>
+            </item>
             <item row="3" column="2">
              <widget class="QSpinBox" name="sfaeMaxSizeSpinBox">
               <property name="maximum">
@@ -690,13 +692,18 @@
               </property>
              </widget>
             </item>
+            <item row="2" column="0">
+             <widget class="QLabel" name="label_38">
+              <property name="text">
+               <string>FFmpeg CMD:</string>
+              </property>
+             </widget>
+            </item>
             <item row="4" column="2">
-             <widget class="QListWidget" name="sfaeExcludeFilesListWidget">
-              <item>
-               <property name="text">
-                <string>.*ini</string>
-               </property>
-              </item>
+             <widget class="QCheckBox" name="sfaeTRCheckBox">
+              <property name="text">
+               <string>trim repeate name</string>
+              </property>
              </widget>
             </item>
            </layout>
@@ -978,7 +985,7 @@
                    <rect>
                     <x>0</x>
                     <y>0</y>
-                    <width>290</width>
+                    <width>289</width>
                     <height>177</height>
                    </rect>
                   </property>
@@ -1051,7 +1058,7 @@
                   <property name="geometry">
                    <rect>
                     <x>0</x>
-                    <y>-159</y>
+                    <y>0</y>
                     <width>428</width>
                     <height>450</height>
                    </rect>

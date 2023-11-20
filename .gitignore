@@ -12,3 +12,5 @@ cache/
 preview/
 thumb/
 .fleet/
+.vscode/
+__pycache__/
